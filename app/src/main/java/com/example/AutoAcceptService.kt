@@ -647,6 +647,16 @@ class AutoAcceptService : AccessibilityService(), TextToSpeech.OnInitListener {
         // Parsing Helpers
         // =========================================================================
 
+        /**
+         * Safely checks if a node belongs to allowed Rapido packages.
+         * Prevents parsing text from YouTube, Chrome, System UI, etc.
+         */
+        fun isNodeFromAllowedPackage(node: AccessibilityNodeInfo?): Boolean {
+            if (node == null) return false
+            val pkg = node.packageName?.toString() ?: return false
+            return ALLOWED_RAPIDO_PACKAGES.contains(pkg)
+        }
+
         fun extractAllScreenTexts(rootNode: AccessibilityNodeInfo?): List<String> {
             if (rootNode == null) return emptyList()
             val texts = mutableListOf<String>()
@@ -657,6 +667,13 @@ class AutoAcceptService : AccessibilityService(), TextToSpeech.OnInitListener {
             while (queue.isNotEmpty() && visited < 150) {
                 val node = queue.removeFirst()
                 visited++
+
+                // Strict Package Check: Ignore any node belonging to YouTube, Chrome, System UI, etc.
+                val nodePkg = node.packageName?.toString()
+                if (nodePkg != null && !ALLOWED_RAPIDO_PACKAGES.contains(nodePkg)) {
+                    continue
+                }
+
                 val text = node.text?.toString()?.trim()
                 if (!text.isNullOrEmpty()) {
                     texts.add(text)
@@ -1186,6 +1203,15 @@ class AutoAcceptService : AccessibilityService(), TextToSpeech.OnInitListener {
             return
         }
 
+        // 2. OVERLAY EVENT LISTENER & TARGET PACKAGE LOCK:
+        // Prioritize overlay and state transition events: TYPE_WINDOW_STATE_CHANGED and TYPE_WINDOW_CONTENT_CHANGED
+        val eventType = event.eventType
+        if (eventType != AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED &&
+            eventType != AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED
+        ) {
+            return
+        }
+
         val eventPackage = event.packageName?.toString() ?: ""
 
         if (eventPackage.isEmpty() ||
@@ -1196,7 +1222,7 @@ class AutoAcceptService : AccessibilityService(), TextToSpeech.OnInitListener {
             return
         }
 
-        // 2. TARGET PACKAGE FILTER (Requirement 2)
+        // Strict early return if event does not originate from allowed Rapido packages
         if (isTargetRapidoOnly(this) && !ALLOWED_RAPIDO_PACKAGES.contains(eventPackage)) {
             return
         }
@@ -1207,22 +1233,31 @@ class AutoAcceptService : AccessibilityService(), TextToSpeech.OnInitListener {
             return
         }
 
-        val rootNode = try {
+        // 4. USE EVENT SOURCE INSTEAD OF ACTIVE WINDOW:
+        // event.source safely isolates the specific window/overlay that triggered the event,
+        // preventing false triggers from background apps like YouTube or Chrome.
+        val sourceNode = try {
+            event.source
+        } catch (e: Exception) {
+            null
+        }
+
+        val targetNode = sourceNode ?: try {
             rootInActiveWindow
         } catch (e: Exception) {
-            Log.w(TAG, "Cannot access root window: ${e.message}")
+            Log.w(TAG, "Cannot access event source or root window: ${e.message}")
             null
         } ?: return
 
-        val rootPackage = rootNode.packageName?.toString() ?: ""
-        if (isTargetRapidoOnly(this) && !ALLOWED_RAPIDO_PACKAGES.contains(rootPackage)) {
+        val nodePackage = targetNode.packageName?.toString() ?: eventPackage
+        if (isTargetRapidoOnly(this) && !ALLOWED_RAPIDO_PACKAGES.contains(nodePackage)) {
             return
         }
 
         try {
-            processActiveWindow(rootNode, if (rootPackage.isNotEmpty()) rootPackage else eventPackage)
+            processActiveWindow(targetNode, if (nodePackage.isNotEmpty()) nodePackage else eventPackage)
         } catch (e: Exception) {
-            Log.e(TAG, "Error evaluating active window: ${e.message}", e)
+            Log.e(TAG, "Error evaluating active window/source: ${e.message}", e)
         }
     }
 
@@ -1735,7 +1770,12 @@ class AutoAcceptService : AccessibilityService(), TextToSpeech.OnInitListener {
             } catch (e: Exception) {
                 emptyList()
             }
-            if (matchingNodes.isNotEmpty()) {
+            // Strict package locking: Ensure matched indicator nodes strictly belong to Rapido
+            val validNodes = matchingNodes.filter { node ->
+                val pkg = node.packageName?.toString()
+                pkg == null || ALLOWED_RAPIDO_PACKAGES.contains(pkg)
+            }
+            if (validNodes.isNotEmpty()) {
                 foundTokens.add(token)
                 if (foundTokens.size >= 3) break
             }
@@ -1745,6 +1785,7 @@ class AutoAcceptService : AccessibilityService(), TextToSpeech.OnInitListener {
 
     /**
      * Traverses the accessibility node hierarchy iteratively to extract all nodes on screen.
+     * Enforces package isolation to strictly ignore nodes from YouTube, Chrome, System UI, etc.
      */
     private fun traverseAllNodes(rootNode: AccessibilityNodeInfo, maxNodes: Int = 800): List<AccessibilityNodeInfo> {
         val nodes = mutableListOf<AccessibilityNodeInfo>()
@@ -1753,6 +1794,13 @@ class AutoAcceptService : AccessibilityService(), TextToSpeech.OnInitListener {
 
         while (queue.isNotEmpty() && nodes.size < maxNodes) {
             val current = queue.poll() ?: break
+
+            val nodePkg = current.packageName?.toString()
+            if (nodePkg != null && !ALLOWED_RAPIDO_PACKAGES.contains(nodePkg)) {
+                // Ignore any node belonging to YouTube, Chrome, System UI, or non-Rapido apps
+                continue
+            }
+
             nodes.add(current)
 
             try {
@@ -1820,6 +1868,11 @@ class AutoAcceptService : AccessibilityService(), TextToSpeech.OnInitListener {
 
         // 2. Fuzzy Keyword Matching with Parent Delegation (Roots: "Accept", "Swipe", "Take", "Confirm", "Go")
         for (node in allNodes) {
+            val nodePkg = node.packageName?.toString()
+            if (nodePkg != null && !ALLOWED_RAPIDO_PACKAGES.contains(nodePkg)) {
+                continue
+            }
+
             val textCandidates = listOfNotNull(
                 node.text?.toString()?.trim(),
                 node.contentDescription?.toString()?.trim()
@@ -1830,6 +1883,11 @@ class AutoAcceptService : AccessibilityService(), TextToSpeech.OnInitListener {
                     if (isNodeValidAcceptButton(node)) {
                         // Parent Delegation (up to 4 levels) to find clickable container
                         val targetClickableNode = findClickableTargetOrAncestor(node, maxLevels = 4)
+                        val targetPkg = targetClickableNode.packageName?.toString()
+                        if (targetPkg != null && !ALLOWED_RAPIDO_PACKAGES.contains(targetPkg)) {
+                            continue
+                        }
+
                         val targetBounds = Rect()
                         try {
                             targetClickableNode.getBoundsInScreen(targetBounds)
@@ -1869,8 +1927,16 @@ class AutoAcceptService : AccessibilityService(), TextToSpeech.OnInitListener {
                 emptyList()
             }
             for (node in matchingNodes) {
+                val nodePkg = node.packageName?.toString()
+                if (nodePkg != null && !ALLOWED_RAPIDO_PACKAGES.contains(nodePkg)) {
+                    continue
+                }
                 if (isNodeValidAcceptButton(node)) {
                     val targetClickableNode = findClickableTargetOrAncestor(node, maxLevels = 4)
+                    val targetPkg = targetClickableNode.packageName?.toString()
+                    if (targetPkg != null && !ALLOWED_RAPIDO_PACKAGES.contains(targetPkg)) {
+                        continue
+                    }
                     val targetBounds = Rect()
                     targetClickableNode.getBoundsInScreen(targetBounds)
                     if (targetBounds.isEmpty) node.getBoundsInScreen(targetBounds)
@@ -1915,6 +1981,11 @@ class AutoAcceptService : AccessibilityService(), TextToSpeech.OnInitListener {
         var maxArea = 0L
 
         for (node in allNodes) {
+            val nodePkg = node.packageName?.toString()
+            if (nodePkg != null && !ALLOWED_RAPIDO_PACKAGES.contains(nodePkg)) {
+                continue
+            }
+
             if (!node.isEnabled) continue
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N && !node.isVisibleToUser) continue
 
@@ -1954,6 +2025,11 @@ class AutoAcceptService : AccessibilityService(), TextToSpeech.OnInitListener {
             }
 
             val clickableTarget = if (node.isClickable) node else findClickableTargetOrAncestor(node, maxLevels = 3)
+            val targetPkg = clickableTarget.packageName?.toString()
+            if (targetPkg != null && !ALLOWED_RAPIDO_PACKAGES.contains(targetPkg)) {
+                continue
+            }
+
             val area = bounds.width().toLong() * bounds.height().toLong()
             if (area > maxArea) {
                 maxArea = area
