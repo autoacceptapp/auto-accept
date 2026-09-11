@@ -70,11 +70,21 @@ data class CapturedRide(
 )
 
 /**
+ * Action type supported for interacting with the accept control
+ */
+enum class ActionType {
+    CLICK,
+    SWIPE
+}
+
+/**
  * Validated button representation before action dispatch
  */
 data class ValidatedButton(
     val node: AccessibilityNodeInfo,
-    val reason: String
+    val reason: String,
+    val actionType: ActionType = ActionType.CLICK,
+    val targetBounds: Rect = Rect()
 )
 
 /**
@@ -380,18 +390,24 @@ class AutoAcceptService : AccessibilityService(), TextToSpeech.OnInitListener {
 
         /**
          * Prevents false positives by strictly verifying button text against negative words and valid patterns.
+         * Resiliently matches roots like Accept, Swipe, Take, Confirm, and Go.
          */
-        fun isValidAcceptText(text: String, keyword: String): Boolean {
+        fun isValidAcceptText(text: String, keyword: String = ""): Boolean {
             if (text.isBlank() || text.length > 35) return false
             val lower = text.lowercase()
             val falsePositiveWords = listOf("do not", "don't", "terms", "policy", "cash", "upi", "card", "condition", "decline", "reject", "cancel", "privacy", "return")
             if (falsePositiveWords.any { lower.contains(it) }) return false
 
-            if (text.equals(keyword, ignoreCase = true)) return true
-            if (text.startsWith(keyword, ignoreCase = true)) return true
+            if (keyword.isNotBlank()) {
+                if (text.equals(keyword, ignoreCase = true)) return true
+                if (text.startsWith(keyword, ignoreCase = true)) return true
+            }
 
-            val pattern = Regex("""^(?:swipe\s+to\s+accept|accept(?:\s+(?:order|ride))?|take\s+order|confirm\s+order)(?:\s*[\(>→»\d\w\s]*)?$""", RegexOption.IGNORE_CASE)
-            return pattern.matches(text)
+            val pattern = Regex("""^(?:swipe\s+to\s+accept|accept(?:\s+(?:order|ride))?|take\s+order|confirm\s+order|go)(?:\s*[\(>→»\d\w\s]*)?$""", RegexOption.IGNORE_CASE)
+            if (pattern.matches(text)) return true
+
+            val fuzzyRootPattern = Regex("""\b(?:accept|swipe|take|confirm|go)\b""", RegexOption.IGNORE_CASE)
+            return fuzzyRootPattern.containsMatchIn(text)
         }
 
         // =========================================================================
@@ -1728,6 +1744,53 @@ class AutoAcceptService : AccessibilityService(), TextToSpeech.OnInitListener {
     }
 
     /**
+     * Traverses the accessibility node hierarchy iteratively to extract all nodes on screen.
+     */
+    private fun traverseAllNodes(rootNode: AccessibilityNodeInfo, maxNodes: Int = 800): List<AccessibilityNodeInfo> {
+        val nodes = mutableListOf<AccessibilityNodeInfo>()
+        val queue = java.util.ArrayDeque<AccessibilityNodeInfo>()
+        queue.add(rootNode)
+
+        while (queue.isNotEmpty() && nodes.size < maxNodes) {
+            val current = queue.poll() ?: break
+            nodes.add(current)
+
+            try {
+                val childCount = current.childCount
+                for (i in 0 until childCount) {
+                    val child = current.getChild(i)
+                    if (child != null) {
+                        queue.add(child)
+                    }
+                }
+            } catch (e: Exception) {
+                // Nodes can become invalid or throw during asynchronous UI updates
+            }
+        }
+        return nodes
+    }
+
+    /**
+     * Delegates up the node tree (up to 4 levels) to find a clickable container or button.
+     */
+    private fun findClickableTargetOrAncestor(node: AccessibilityNodeInfo, maxLevels: Int = 4): AccessibilityNodeInfo {
+        if (node.isClickable && node.isEnabled) {
+            return node
+        }
+        var current: AccessibilityNodeInfo? = node
+        var depth = 0
+        while (current != null && depth < maxLevels) {
+            val parent = try { current.parent } catch (e: Exception) { null } ?: break
+            if (parent.isClickable && parent.isEnabled) {
+                return parent
+            }
+            current = parent
+            depth++
+        }
+        return node
+    }
+
+    /**
      * Validates that an accessibility node is visible, enabled, and has valid on-screen dimensions.
      */
     private fun isNodeValidAcceptButton(node: AccessibilityNodeInfo): Boolean {
@@ -1748,10 +1811,57 @@ class AutoAcceptService : AccessibilityService(), TextToSpeech.OnInitListener {
     }
 
     /**
-     * Finds the legitimate accept button in the active ride window, preventing false positives.
+     * Finds the legitimate accept button in the active ride window, using deep node traversal,
+     * fuzzy keyword matching with parent delegation, ViewID lookup, and bottom-screen heuristic fallback.
      */
     private fun findAcceptButton(rootNode: AccessibilityNodeInfo): ValidatedButton? {
-        // 1. Check known View IDs
+        // 1. Deep Node Traversal: Traverse all nodes on screen
+        val allNodes = traverseAllNodes(rootNode)
+
+        // 2. Fuzzy Keyword Matching with Parent Delegation (Roots: "Accept", "Swipe", "Take", "Confirm", "Go")
+        for (node in allNodes) {
+            val textCandidates = listOfNotNull(
+                node.text?.toString()?.trim(),
+                node.contentDescription?.toString()?.trim()
+            ).filter { it.isNotBlank() }
+
+            for (text in textCandidates) {
+                if (isValidAcceptText(text)) {
+                    if (isNodeValidAcceptButton(node)) {
+                        // Parent Delegation (up to 4 levels) to find clickable container
+                        val targetClickableNode = findClickableTargetOrAncestor(node, maxLevels = 4)
+                        val targetBounds = Rect()
+                        try {
+                            targetClickableNode.getBoundsInScreen(targetBounds)
+                            if (targetBounds.isEmpty || targetBounds.width() <= 10 || targetBounds.height() <= 10) {
+                                node.getBoundsInScreen(targetBounds)
+                            }
+                        } catch (e: Exception) {
+                            node.getBoundsInScreen(targetBounds)
+                        }
+
+                        // Smart Action Routing: check if text implies swipe vs click
+                        val isSwipe = text.contains("swipe", ignoreCase = true)
+                        val actionType = if (isSwipe) ActionType.SWIPE else ActionType.CLICK
+
+                        val reason = if (isSwipe) {
+                            "Fuzzy Keyword Swipe ('$text')"
+                        } else {
+                            "Fuzzy Keyword Accept ('$text')"
+                        }
+
+                        return ValidatedButton(
+                            node = targetClickableNode,
+                            reason = reason,
+                            actionType = actionType,
+                            targetBounds = targetBounds
+                        )
+                    }
+                }
+            }
+        }
+
+        // 3. Fallback to Known View IDs if present
         for (viewId in ACCEPT_BUTTON_VIEW_IDS) {
             val matchingNodes = try {
                 rootNode.findAccessibilityNodeInfosByViewId(viewId)
@@ -1760,72 +1870,241 @@ class AutoAcceptService : AccessibilityService(), TextToSpeech.OnInitListener {
             }
             for (node in matchingNodes) {
                 if (isNodeValidAcceptButton(node)) {
-                    return ValidatedButton(node, "View ID ($viewId)")
+                    val targetClickableNode = findClickableTargetOrAncestor(node, maxLevels = 4)
+                    val targetBounds = Rect()
+                    targetClickableNode.getBoundsInScreen(targetBounds)
+                    if (targetBounds.isEmpty) node.getBoundsInScreen(targetBounds)
+                    return ValidatedButton(
+                        node = targetClickableNode,
+                        reason = "View ID ($viewId)",
+                        actionType = ActionType.CLICK,
+                        targetBounds = targetBounds
+                    )
                 }
             }
         }
 
-        // 2. Check keywords with strict filtering
-        for (keyword in ACCEPT_BUTTON_KEYWORDS) {
-            val nodesWithText = try {
-                rootNode.findAccessibilityNodeInfosByText(keyword)
-            } catch (e: Exception) {
-                emptyList()
-            }
-            for (node in nodesWithText) {
-                val text = (node.text?.toString() ?: node.contentDescription?.toString() ?: "").trim()
-                if (isValidAcceptText(text, keyword)) {
-                    if (isNodeValidAcceptButton(node)) {
-                        return ValidatedButton(node, "Keyword ('$keyword')")
-                    }
-                }
-            }
+        // 4. Bottom-Screen Heuristic Fallback:
+        // Scan bottom 25% of screen bounds for largest clickable ViewGroup or Button
+        val displayHeight = resources.displayMetrics.heightPixels
+        val rootBounds = Rect()
+        try {
+            rootNode.getBoundsInScreen(rootBounds)
+        } catch (e: Exception) {}
+        val screenHeight = if (!rootBounds.isEmpty && rootBounds.height() > 200) {
+            rootBounds.height()
+        } else {
+            displayHeight
+        }
+
+        val bottomFallback = findBottomScreenHeuristicButton(allNodes, screenHeight)
+        if (bottomFallback != null) {
+            return bottomFallback
         }
 
         return null
     }
 
     /**
-     * Executes the accept action, preferring ACTION_CLICK on clickable nodes/ancestors before coordinate gestures.
+     * Scans the bottom 25% of the screen bounds for the largest clickable ViewGroup or Button.
      */
-    private suspend fun executeAcceptClick(button: ValidatedButton): ClickResult {
-        Log.d(TAG, "Click attempted via ${button.reason}")
-        // 1. Try ACTION_CLICK on the node or its closest clickable ancestor
-        var target: AccessibilityNodeInfo? = button.node
-        var depth = 0
-        while (target != null && !target.isClickable && depth < 4) {
-            target = try { target.parent } catch (e: Exception) { null }
-            depth++
-        }
+    private fun findBottomScreenHeuristicButton(allNodes: List<AccessibilityNodeInfo>, screenHeight: Int): ValidatedButton? {
+        val bottomThreshold = screenHeight * 0.75f
+        var bestCandidate: AccessibilityNodeInfo? = null
+        var bestBounds = Rect()
+        var maxArea = 0L
 
-        if (target != null && target.isClickable && target.isEnabled) {
-            val directSuccess = try {
-                target.performAction(AccessibilityNodeInfo.ACTION_CLICK)
+        for (node in allNodes) {
+            if (!node.isEnabled) continue
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N && !node.isVisibleToUser) continue
+
+            val bounds = Rect()
+            try {
+                node.getBoundsInScreen(bounds)
             } catch (e: Exception) {
-                Log.w(TAG, "Exception during ACTION_CLICK: ${e.message}")
-                false
+                continue
             }
-            if (directSuccess) {
-                Log.d(TAG, "Direct click completed via ${button.reason}")
-                return ClickResult.Success("ACTION_CLICK via ${button.reason}")
-            } else {
-                Log.d(TAG, "Direct click returned false, attempting gesture fallback")
+
+            // Must reside in the bottom 25% of the screen
+            if (bounds.centerY() < bottomThreshold && bounds.bottom < bottomThreshold) {
+                continue
+            }
+
+            // Exclude fullscreen roots and tiny invisible controls
+            if (bounds.height() >= (screenHeight * 0.40f) || bounds.width() <= 30 || bounds.height() <= 20) {
+                continue
+            }
+
+            // Check if it is a Button, ViewGroup, or clickable element
+            val className = node.className?.toString() ?: ""
+            val isButtonOrGroup = className.contains("Button", ignoreCase = true) ||
+                    className.contains("ViewGroup", ignoreCase = true) ||
+                    className.contains("Layout", ignoreCase = true) ||
+                    node.isClickable
+
+            if (!isButtonOrGroup && !node.isClickable) {
+                continue
+            }
+
+            // Exclude negative words
+            val textCombined = ((node.text?.toString() ?: "") + " " + (node.contentDescription?.toString() ?: "")).lowercase()
+            val negativeWords = listOf("decline", "reject", "cancel", "back", "home", "terms", "policy", "cash", "upi", "profile", "close")
+            if (negativeWords.any { textCombined.contains(it) }) {
+                continue
+            }
+
+            val clickableTarget = if (node.isClickable) node else findClickableTargetOrAncestor(node, maxLevels = 3)
+            val area = bounds.width().toLong() * bounds.height().toLong()
+            if (area > maxArea) {
+                maxArea = area
+                bestCandidate = clickableTarget
+                bestBounds = Rect(bounds)
             }
         }
 
-        // 2. Coordinate gesture fallback
-        return dispatchCoordinateTapSuspending(button.node, button.reason)
+        if (bestCandidate != null && maxArea > 0) {
+            val textCombined = ((bestCandidate.text?.toString() ?: "") + " " + (bestCandidate.contentDescription?.toString() ?: "")).lowercase()
+            val isSwipe = textCombined.contains("swipe")
+            val actionType = if (isSwipe) ActionType.SWIPE else ActionType.CLICK
+            return ValidatedButton(
+                node = bestCandidate,
+                reason = "Bottom-Screen Heuristic Fallback (${if (isSwipe) "Swipe" else "Click"}, Area: $maxArea)",
+                actionType = actionType,
+                targetBounds = bestBounds
+            )
+        }
+
+        return null
     }
 
     /**
-     * Dispatches coordinate gesture with GestureResultCallback, awaiting completion or cancellation.
+     * Unified method to find and execute accept interaction on the active screen.
      */
-    private suspend fun dispatchCoordinateTapSuspending(node: AccessibilityNodeInfo, reason: String): ClickResult {
+    suspend fun findAndClickAcceptButton(rootNode: AccessibilityNodeInfo): ClickResult {
+        val button = findAcceptButton(rootNode)
+            ?: return ClickResult.Failed("Accept button not found on screen")
+        return executeAcceptClick(button)
+    }
+
+    /**
+     * Executes the accept action, routing between Swipe and Click with coordinate tap fallback.
+     */
+    private suspend fun executeAcceptClick(button: ValidatedButton): ClickResult {
+        Log.d(TAG, "Accept action attempted via ${button.reason} [Action: ${button.actionType}]")
+
+        return when (button.actionType) {
+            ActionType.SWIPE -> {
+                dispatchHorizontalSwipeSuspending(button.node, button.targetBounds, button.reason)
+            }
+            ActionType.CLICK -> {
+                var directSuccess = false
+                try {
+                    if (button.node.isClickable && button.node.isEnabled) {
+                        directSuccess = button.node.performAction(AccessibilityNodeInfo.ACTION_CLICK)
+                    }
+                } catch (e: Exception) {
+                    Log.w(TAG, "Exception during ACTION_CLICK: ${e.message}")
+                    directSuccess = false
+                }
+
+                if (directSuccess) {
+                    Log.d(TAG, "Direct click completed via ${button.reason}")
+                    ClickResult.Success("ACTION_CLICK via ${button.reason}")
+                } else {
+                    Log.d(TAG, "Direct click returned false/failed, falling back to coordinate tap")
+                    dispatchCoordinateTapSuspending(button.node, button.targetBounds, button.reason)
+                }
+            }
+        }
+    }
+
+    /**
+     * Dispatches a horizontal swipe gesture from the left edge to the right edge of the target bounds.
+     */
+    private suspend fun dispatchHorizontalSwipeSuspending(
+        node: AccessibilityNodeInfo,
+        presetBounds: Rect,
+        reason: String
+    ): ClickResult {
         val bounds = Rect()
-        try {
-            node.getBoundsInScreen(bounds)
-        } catch (e: Exception) {
-            return ClickResult.Failed("Failed to read node bounds: ${e.message}")
+        if (!presetBounds.isEmpty) {
+            bounds.set(presetBounds)
+        } else {
+            try {
+                node.getBoundsInScreen(bounds)
+            } catch (e: Exception) {
+                return ClickResult.Failed("Failed to read node bounds for swipe: ${e.message}")
+            }
+        }
+
+        if (bounds.isEmpty || bounds.width() <= 10 || bounds.height() <= 10) {
+            return ClickResult.Failed("Invalid node bounds for swipe gesture: $bounds")
+        }
+
+        val startX = bounds.left.toFloat() + (bounds.width() * 0.12f)
+        val endX = bounds.right.toFloat() - (bounds.width() * 0.08f)
+        val centerY = bounds.centerY().toFloat()
+
+        val swipePath = Path().apply {
+            moveTo(startX, centerY)
+            lineTo(endX, centerY)
+        }
+
+        val stroke = GestureDescription.StrokeDescription(swipePath, 0, 350)
+        val gesture = GestureDescription.Builder().addStroke(stroke).build()
+
+        return suspendCancellableCoroutine { cont ->
+            try {
+                val queued = dispatchGesture(gesture, object : GestureResultCallback() {
+                    override fun onCompleted(gestureDescription: GestureDescription?) {
+                        super.onCompleted(gestureDescription)
+                        Log.d(TAG, "Horizontal swipe onCompleted from ($startX, $centerY) to ($endX, $centerY) via $reason")
+                        if (cont.isActive) {
+                            cont.resume(ClickResult.Success("SWIPE from left to right at Y=$centerY"))
+                        }
+                    }
+
+                    override fun onCancelled(gestureDescription: GestureDescription?) {
+                        super.onCancelled(gestureDescription)
+                        Log.w(TAG, "Horizontal swipe onCancelled via $reason")
+                        if (cont.isActive) {
+                            cont.resume(ClickResult.Cancelled("Swipe cancelled by system"))
+                        }
+                    }
+                }, null)
+
+                if (!queued) {
+                    Log.w(TAG, "dispatchGesture for swipe returned false")
+                    if (cont.isActive) {
+                        cont.resume(ClickResult.Failed("dispatchGesture for swipe returned false"))
+                    }
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, "Exception during horizontal swipe: ${e.message}", e)
+                if (cont.isActive) {
+                    cont.resume(ClickResult.Failed("Swipe exception: ${e.message}"))
+                }
+            }
+        }
+    }
+
+    /**
+     * Dispatches coordinate tap gesture with GestureResultCallback, awaiting completion or cancellation.
+     */
+    private suspend fun dispatchCoordinateTapSuspending(
+        node: AccessibilityNodeInfo,
+        presetBounds: Rect,
+        reason: String
+    ): ClickResult {
+        val bounds = Rect()
+        if (!presetBounds.isEmpty) {
+            bounds.set(presetBounds)
+        } else {
+            try {
+                node.getBoundsInScreen(bounds)
+            } catch (e: Exception) {
+                return ClickResult.Failed("Failed to read node bounds: ${e.message}")
+            }
         }
 
         if (bounds.isEmpty || bounds.width() <= 0 || bounds.height() <= 0) {
@@ -1849,7 +2128,7 @@ class AutoAcceptService : AccessibilityService(), TextToSpeech.OnInitListener {
                         super.onCompleted(gestureDescription)
                         Log.d(TAG, "Coordinate tap onCompleted at ($centerX, $centerY) via $reason")
                         if (cont.isActive) {
-                            cont.resume(ClickResult.Success("GESTURE at ($centerX, $centerY)"))
+                            cont.resume(ClickResult.Success("GESTURE_TAP at ($centerX, $centerY)"))
                         }
                     }
 
