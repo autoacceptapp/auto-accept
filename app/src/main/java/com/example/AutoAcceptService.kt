@@ -1,0 +1,1911 @@
+package com.example
+
+import android.accessibilityservice.AccessibilityService
+import android.accessibilityservice.GestureDescription
+import android.app.NotificationChannel
+import android.app.NotificationManager
+import android.app.PendingIntent
+import android.content.Context
+import android.content.Intent
+import android.content.pm.ServiceInfo
+import android.graphics.Path
+import android.graphics.Rect
+import android.os.Build
+import android.os.PowerManager
+import android.os.SystemClock
+import android.speech.tts.TextToSpeech
+import android.util.Log
+import android.view.accessibility.AccessibilityEvent
+import android.view.accessibility.AccessibilityNodeInfo
+import androidx.core.app.NotificationCompat
+import com.google.firebase.FirebaseApp
+import com.google.firebase.auth.FirebaseAuth
+import com.google.firebase.firestore.FieldValue
+import com.google.firebase.firestore.FirebaseFirestore
+import com.google.firebase.firestore.SetOptions
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.suspendCancellableCoroutine
+import kotlinx.coroutines.tasks.await
+import kotlinx.coroutines.withContext
+import org.json.JSONArray
+import org.json.JSONObject
+import java.util.Locale
+import java.util.UUID
+import java.util.concurrent.ConcurrentHashMap
+import kotlin.coroutines.resume
+
+/**
+ * ServiceEventType categorized for dashboard visualization
+ */
+enum class ServiceEventType {
+    RIDE_DETECTED,
+    ORDER_ACCEPTED,
+    ORDER_IGNORED,
+    ORDER_QUEUED,
+    MONITORING
+}
+
+/**
+ * CapturedRide data snapshot for post-delay safety verification
+ */
+data class CapturedRide(
+    val sourcePackage: String,
+    val price: Float?,
+    val distanceKm: Float?,
+    val pickup: String,
+    val drop: String,
+    val signature: String,
+    val acceptReason: String,
+    val isPremium: Boolean,
+    val delayMs: Long
+)
+
+/**
+ * Validated button representation before action dispatch
+ */
+data class ValidatedButton(
+    val node: AccessibilityNodeInfo,
+    val reason: String
+)
+
+/**
+ * Outcome of click/gesture execution with distinction between success, cancellation, and failure
+ */
+sealed class ClickResult {
+    data class Success(val method: String) : ClickResult()
+    data class Cancelled(val reason: String) : ClickResult()
+    data class Failed(val reason: String) : ClickResult()
+}
+
+/**
+ * ServiceEvent model representing real-time telemetry captured by AutoAcceptService.
+ */
+data class ServiceEvent(
+    val id: String = UUID.randomUUID().toString(),
+    val timestamp: Long = System.currentTimeMillis(),
+    val type: ServiceEventType = ServiceEventType.MONITORING,
+    val title: String = "",
+    val description: String = "",
+    val details: String = "",
+    val badge: String = ""
+)
+
+/**
+ * RideLogItem data model representing each processed order logged locally.
+ */
+data class RideLogItem(
+    val id: String = "",
+    val userId: String = "",
+    val price: Float = 0f,
+    val pickupKm: Float = 0f,
+    val pickupLocation: String = "",
+    val dropLocation: String = "",
+    val status: String = "", // "ACCEPTED", "IGNORED"
+    val reason: String = "",
+    val sourcePackage: String = "",
+    val createdMillis: Long = System.currentTimeMillis()
+)
+
+/**
+ * AutoAcceptService - Smart Auto-Accept Accessibility Service for Rapido Captain.
+ *
+ * Implements strict conditional filter architecture:
+ * 1. Master ON/OFF Switch: Completely halts or enables automated processing.
+ * 2. Individual Filter Toggles:
+ *    - Distance Filter (ON/OFF): If ON, checks distance <= maxDistance. If OFF, completely bypassed.
+ *    - Price Filter (ON/OFF): If ON, checks minPrice <= fare <= maxPrice. If OFF, completely bypassed.
+ *    - Blacklist Filter (ON/OFF): If ON, rejects if any keyword matched. If OFF, completely bypassed.
+ * 3. Accept All Override: If Master Switch is ON but ALL individual filters are OFF, accepts any order.
+ * 4. Voice Announcer (Text-To-Speech): Parses screen data and announces details dynamically.
+ */
+class AutoAcceptService : AccessibilityService(), TextToSpeech.OnInitListener {
+
+    private var lastClickTimestamp: Long = 0
+    private var textToSpeech: TextToSpeech? = null
+    private var isTtsInitialized: Boolean = false
+
+    // Lifecycle-bound coroutine management and pending accept tracking (Requirements 8, 14, 15)
+    private var serviceJob = SupervisorJob()
+    private var serviceScopeInstance = CoroutineScope(Dispatchers.Main + serviceJob)
+    private var pendingAcceptJob: Job? = null
+    private var pendingRideSignature: String? = null
+
+    /**
+     * Safely cancels pending scheduled accept job and notifies telemetry
+     */
+    fun cancelPendingAcceptInternal(reason: String = "Operation cancelled") {
+        val job = pendingAcceptJob
+        val sig = pendingRideSignature
+        if (job != null && job.isActive) {
+            job.cancel()
+            Log.i(TAG, "Pending accept cancelled: $reason (signature=$sig)")
+            _recentLog.value = "Pending accept cancelled: $reason"
+            logServiceEvent(
+                type = ServiceEventType.ORDER_IGNORED,
+                title = "Accept cancelled",
+                description = "Pending accept cancelled: $reason",
+                badge = "CANCELLED"
+            )
+        }
+        pendingAcceptJob = null
+        pendingRideSignature = null
+    }
+
+    companion object {
+        private const val TAG = "AutoAcceptService"
+        const val PREFS_NAME = "auto_accept_preferences"
+
+        // Notification Channel Constants
+        const val NOTIFICATION_CHANNEL_ID = "auto_accept_channel"
+        const val NOTIFICATION_CHANNEL_NAME = "Auto Accept Service"
+        const val NOTIFICATION_ID = 1
+
+        // SharedPreferences Keys
+        const val KEY_AUTO_ACCEPT_ENABLED = "key_auto_accept_enabled"
+        const val KEY_TARGET_RAPIDO_ONLY = "key_target_rapido_only"
+        const val KEY_IS_PASS_ACTIVE = "key_is_pass_active"
+        const val KEY_WAKE_LOCK_ENABLED = "key_wake_lock_enabled"
+        const val KEY_LOCAL_RIDE_LOGS = "key_local_ride_logs"
+
+        // Firestore Configuration & Exponential Backoff Parameters
+        const val FIRESTORE_ORDERS_COLLECTION = "accepted_rides"
+        const val FIRESTORE_MAX_RETRIES = 5
+        const val FIRESTORE_INITIAL_DELAY_MS = 1000L
+        const val FIRESTORE_MAX_DELAY_MS = 30000L
+        const val FIRESTORE_BACKOFF_FACTOR = 2.0
+
+        private val serviceScope = CoroutineScope(Dispatchers.IO + SupervisorJob())
+
+        // Individual Filter Toggles & Values
+        const val KEY_DISTANCE_FILTER_ENABLED = "key_distance_filter_enabled"
+        const val KEY_MAX_DISTANCE_KM = "key_max_distance_km"
+
+        const val KEY_PRICE_FILTER_ENABLED = "key_price_filter_enabled"
+        const val KEY_MIN_PRICE = "key_min_price"
+        const val KEY_MAX_PRICE = "key_max_price"
+
+        const val KEY_BLACKLIST_ENABLED = "key_blacklist_enabled"
+        const val KEY_BLACKLIST_KEYWORDS = "key_blacklist_keywords"
+
+        const val KEY_TTS_ENABLED = "key_tts_enabled"
+        const val KEY_TTS_LANGUAGE = "key_tts_language"
+        const val KEY_USER_NAME = "key_user_name"
+
+        // Default Filter Values
+        const val DEFAULT_MAX_DISTANCE_KM = 5.0f
+        const val DEFAULT_MIN_PRICE = 40.0f
+        const val DEFAULT_MAX_PRICE = 500.0f
+        const val DEFAULT_USER_NAME = "Captain"
+        const val DEFAULT_TTS_LANGUAGE = "en"
+        const val DEFAULT_BLACKLIST_KEYWORDS = "Airport, Toll, Slum, Waterlog"
+
+        // Rate-limiting debounce cooldown (3000ms)
+        private const val CLICK_COOLDOWN_MS = 3000L
+
+        // Reactive StateFlows observed by MainActivity Compose UI
+        private val _isServiceRunning = MutableStateFlow(false)
+        val isServiceRunning: StateFlow<Boolean> = _isServiceRunning.asStateFlow()
+
+        private val _recentLog = MutableStateFlow("Service initialized. Ready for Rapido orders.")
+        val recentLog: StateFlow<String> = _recentLog.asStateFlow()
+
+        // Local ride logs StateFlow (offline persistence via SharedPreferences JSON)
+        private val _localRideLogs = MutableStateFlow<List<RideLogItem>>(emptyList())
+        val localRideLogs: StateFlow<List<RideLogItem>> = _localRideLogs.asStateFlow()
+
+        // Live visual events StateFlow for dashboard activity stream
+        private val _serviceEvents = MutableStateFlow<List<ServiceEvent>>(
+            listOf(
+                ServiceEvent(
+                    type = ServiceEventType.MONITORING,
+                    title = "Monitoring Active",
+                    description = "Watching Rapido Captain for incoming rides",
+                    details = "AutoAccept accessibility layer ready",
+                    badge = "READY"
+                )
+            )
+        )
+        val serviceEvents: StateFlow<List<ServiceEvent>> = _serviceEvents.asStateFlow()
+
+        fun logServiceEvent(
+            type: ServiceEventType,
+            title: String,
+            description: String,
+            details: String = "",
+            badge: String = ""
+        ) {
+            val event = ServiceEvent(
+                type = type,
+                title = title,
+                description = description,
+                details = details,
+                badge = badge.ifBlank {
+                    when (type) {
+                        ServiceEventType.RIDE_DETECTED -> "DETECTED"
+                        ServiceEventType.ORDER_ACCEPTED -> "ACCEPTED"
+                        ServiceEventType.ORDER_IGNORED -> "FILTERED"
+                        ServiceEventType.ORDER_QUEUED -> "QUEUED"
+                        ServiceEventType.MONITORING -> "ONLINE"
+                    }
+                }
+            )
+            val updated = (listOf(event) + _serviceEvents.value).take(60)
+            _serviceEvents.value = updated
+            _recentLog.value = "$title: $description"
+        }
+
+        fun clearServiceEvents() {
+            _serviceEvents.value = emptyList()
+        }
+
+        fun simulateTestEvent() {
+            val sampleFares = listOf(78, 124, 182, 245)
+            val sampleDists = listOf(1.9f, 3.8f, 5.4f, 7.6f)
+            val samplePickups = listOf("Indiranagar 12th Main", "Koramangala 5th Block", "MG Road Metro", "HSR Sector 1")
+            val sampleDrops = listOf("Electronic City Phase 1", "Bellandur EcoSpace", "Whitefield ITPL", "Manyata Tech Park")
+            val idx = (0..3).random()
+            val fare = sampleFares[idx]
+            val dist = sampleDists[idx]
+            val pickup = samplePickups[idx]
+            val drop = sampleDrops[idx]
+
+            logServiceEvent(
+                type = ServiceEventType.RIDE_DETECTED,
+                title = "Ride detected",
+                description = "₹$fare • ${dist} km • $pickup → $drop",
+                details = "Matched tokens: ₹, Pickup, Drop, km",
+                badge = "DETECTED"
+            )
+
+            logServiceEvent(
+                type = ServiceEventType.ORDER_ACCEPTED,
+                title = "Order accepted",
+                description = "High-speed auto-click executed for ₹$fare ($dist km)",
+                details = "Turbo Engine (190ms response delay)",
+                badge = "ACCEPTED"
+            )
+        }
+
+        private var instance: AutoAcceptService? = null
+
+        // Target packages for Rapido Captain
+        const val RAPIDO_CAPTAIN_PACKAGE = "com.rapido.captain"
+        val ALLOWED_RAPIDO_PACKAGES = setOf(
+            RAPIDO_CAPTAIN_PACKAGE,
+            "com.rapido.rider",
+            "com.rapido.driver"
+        )
+
+        // Contextual tokens indicating an active incoming ride overlay
+        val RIDE_CONTEXT_INDICATORS = listOf(
+            "Pickup",
+            "Pick up",
+            "Drop",
+            "Drop off",
+            "₹",
+            "Rs",
+            "INR",
+            "km",
+            "KM",
+            "Distance",
+            "Fare",
+            "Earnings",
+            "Est. Fare",
+            "Captain Fare"
+        )
+
+        val ACCEPT_BUTTON_KEYWORDS = listOf(
+            "Accept",
+            "ACCEPT",
+            "Accept Order",
+            "Accept Ride",
+            "Swipe to Accept",
+            "Take Order",
+            "Confirm Order"
+        )
+        val ACCEPT_KEYWORDS = ACCEPT_BUTTON_KEYWORDS
+
+        val ACCEPT_BUTTON_VIEW_IDS = listOf(
+            "btn_accept",
+            "accept_ride_button",
+            "btnAccept",
+            "button_accept",
+            "order_accept_btn",
+            "accept_order_container"
+        )
+
+        // Regex patterns for distance and price
+        val DISTANCE_REGEX = Regex("""(\d+(?:\.\d+)?)\s*(?:km|kms)""", RegexOption.IGNORE_CASE)
+
+        val PRICE_REGEX = Regex(
+            """(?:(?:₹|Rs\.?|INR)\s*(\d+(?:\.\d+)?)|(\d+(?:\.\d+)?)\s*(?:₹|Rs\.?|INR))""",
+            RegexOption.IGNORE_CASE
+        )
+
+        // Duplicate accept prevention cache: ride signature -> last accepted timestamp (Requirement 7)
+        private val recentlyAcceptedRides = ConcurrentHashMap<String, Long>()
+        private const val DUPLICATE_COOLDOWN_MS = 25000L
+
+        private fun cleanStaleAcceptedRides() {
+            val cutoff = System.currentTimeMillis() - DUPLICATE_COOLDOWN_MS
+            val it = recentlyAcceptedRides.entries.iterator()
+            while (it.hasNext()) {
+                val entry = it.next()
+                if (entry.value < cutoff) {
+                    it.remove()
+                }
+            }
+        }
+
+        fun generateRideSignature(sourcePackage: String, price: Float?, distanceKm: Float?, pickup: String, drop: String): String {
+            val p = price?.toInt()?.toString() ?: "any_fare"
+            val d = distanceKm?.let { String.format(Locale.US, "%.1f", it) } ?: "any_dist"
+            val pick = pickup.trim().lowercase().take(30)
+            val drp = drop.trim().lowercase().take(30)
+            return "$sourcePackage#$p#$d#$pick#$drp"
+        }
+
+        fun cancelPendingAccept(reason: String = "Operation cancelled") {
+            instance?.cancelPendingAcceptInternal(reason)
+        }
+
+        /**
+         * Prevents false positives by strictly verifying button text against negative words and valid patterns.
+         */
+        fun isValidAcceptText(text: String, keyword: String): Boolean {
+            if (text.isBlank() || text.length > 35) return false
+            val lower = text.lowercase()
+            val falsePositiveWords = listOf("do not", "don't", "terms", "policy", "cash", "upi", "card", "condition", "decline", "reject", "cancel", "privacy", "return")
+            if (falsePositiveWords.any { lower.contains(it) }) return false
+
+            if (text.equals(keyword, ignoreCase = true)) return true
+            if (text.startsWith(keyword, ignoreCase = true)) return true
+
+            val pattern = Regex("""^(?:swipe\s+to\s+accept|accept(?:\s+(?:order|ride))?|take\s+order|confirm\s+order)(?:\s*[\(>→»\d\w\s]*)?$""", RegexOption.IGNORE_CASE)
+            return pattern.matches(text)
+        }
+
+        // =========================================================================
+        // SharedPreferences Getters & Setters
+        // =========================================================================
+
+        fun isAutomationEnabled(context: Context): Boolean {
+            val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            return prefs.getBoolean(KEY_AUTO_ACCEPT_ENABLED, true)
+        }
+
+        fun setAutomationEnabled(context: Context, enabled: Boolean) {
+            val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            prefs.edit().putBoolean(KEY_AUTO_ACCEPT_ENABLED, enabled).apply()
+            if (!enabled) {
+                instance?.cancelPendingAcceptInternal("Master switch turned OFF")
+            }
+            _recentLog.value = if (enabled) {
+                "Master Switch: ON. Active & listening for orders."
+            } else {
+                "Master Switch: OFF. Auto-accept is paused."
+            }
+        }
+
+        // Distance Filter Toggle & Value
+        fun isDistanceFilterEnabled(context: Context): Boolean {
+            val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            return prefs.getBoolean(KEY_DISTANCE_FILTER_ENABLED, true)
+        }
+
+        fun setDistanceFilterEnabled(context: Context, enabled: Boolean) {
+            val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            prefs.edit().putBoolean(KEY_DISTANCE_FILTER_ENABLED, enabled).apply()
+        }
+
+        fun getMaxDistanceKm(context: Context): Float {
+            val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            return prefs.getFloat(KEY_MAX_DISTANCE_KM, DEFAULT_MAX_DISTANCE_KM)
+        }
+
+        fun setMaxDistanceKm(context: Context, maxDistance: Float) {
+            val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            prefs.edit().putFloat(KEY_MAX_DISTANCE_KM, maxDistance).apply()
+        }
+
+        // Price Filter Toggle & Values
+        fun isPriceFilterEnabled(context: Context): Boolean {
+            val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            return prefs.getBoolean(KEY_PRICE_FILTER_ENABLED, true)
+        }
+
+        fun setPriceFilterEnabled(context: Context, enabled: Boolean) {
+            val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            prefs.edit().putBoolean(KEY_PRICE_FILTER_ENABLED, enabled).apply()
+        }
+
+        fun getMinPrice(context: Context): Float {
+            val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            return prefs.getFloat(KEY_MIN_PRICE, DEFAULT_MIN_PRICE)
+        }
+
+        fun setMinPrice(context: Context, minPrice: Float) {
+            val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            prefs.edit().putFloat(KEY_MIN_PRICE, minPrice).apply()
+        }
+
+        fun getMaxPrice(context: Context): Float {
+            val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            return prefs.getFloat(KEY_MAX_PRICE, DEFAULT_MAX_PRICE)
+        }
+
+        fun setMaxPrice(context: Context, maxPrice: Float) {
+            val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            prefs.edit().putFloat(KEY_MAX_PRICE, maxPrice).apply()
+        }
+
+        // Blacklist Filter Toggle & Keywords
+        fun isBlacklistEnabled(context: Context): Boolean {
+            val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            return prefs.getBoolean(KEY_BLACKLIST_ENABLED, true)
+        }
+
+        fun setBlacklistEnabled(context: Context, enabled: Boolean) {
+            val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            prefs.edit().putBoolean(KEY_BLACKLIST_ENABLED, enabled).apply()
+        }
+
+        fun getBlacklistKeywords(context: Context): String {
+            val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            return prefs.getString(KEY_BLACKLIST_KEYWORDS, DEFAULT_BLACKLIST_KEYWORDS) ?: DEFAULT_BLACKLIST_KEYWORDS
+        }
+
+        fun setBlacklistKeywords(context: Context, keywords: String) {
+            val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            prefs.edit().putString(KEY_BLACKLIST_KEYWORDS, keywords).apply()
+        }
+
+        // Voice Announcer (TTS) Toggle & User Name
+        fun isTtsEnabled(context: Context): Boolean {
+            val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            return prefs.getBoolean(KEY_TTS_ENABLED, true)
+        }
+
+        fun setTtsEnabled(context: Context, enabled: Boolean) {
+            val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            prefs.edit().putBoolean(KEY_TTS_ENABLED, enabled).apply()
+        }
+
+        fun getUserName(context: Context): String {
+            val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            return prefs.getString(KEY_USER_NAME, DEFAULT_USER_NAME) ?: DEFAULT_USER_NAME
+        }
+
+        fun setUserName(context: Context, name: String) {
+            val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            prefs.edit().putString(KEY_USER_NAME, name).apply()
+        }
+
+        // Multi-Language TTS Language (en, hi, gu, mr)
+        fun getTtsLanguage(context: Context): String {
+            val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            return prefs.getString(KEY_TTS_LANGUAGE, DEFAULT_TTS_LANGUAGE) ?: DEFAULT_TTS_LANGUAGE
+        }
+
+        fun setTtsLanguage(context: Context, lang: String) {
+            val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            prefs.edit().putString(KEY_TTS_LANGUAGE, lang).apply()
+            instance?.applyTtsLanguage(lang)
+        }
+
+        fun getLocaleForLanguage(lang: String): Locale {
+            return when (lang.lowercase()) {
+                "hi" -> Locale.forLanguageTag("hi-IN")
+                "gu" -> Locale.forLanguageTag("gu-IN")
+                "mr" -> Locale.forLanguageTag("mr-IN")
+                else -> Locale.US
+            }
+        }
+
+        fun generateOrderAnnouncement(
+            context: Context,
+            name: String,
+            price: Int?,
+            distanceKm: Float?,
+            dropLocation: String? = null
+        ): String {
+            val lang = getTtsLanguage(context)
+            val driverName = name.ifBlank { DEFAULT_USER_NAME }
+            val priceStr = price?.toString() ?: "120"
+            val distStr = distanceKm?.let { String.format(Locale.US, "%.1f", it) } ?: "1.5"
+
+            return when (lang.lowercase()) {
+                "hi" -> {
+                    val dropStr = if (!dropLocation.isNullOrBlank()) " Drop $dropLocation par hai." else ""
+                    "Hello $driverName, naya order aaya hai, $priceStr rupaye ka, doori $distStr kilometer.$dropStr"
+                }
+                "gu" -> {
+                    val dropStr = if (!dropLocation.isNullOrBlank()) " Drop $dropLocation par che." else ""
+                    "Hello $driverName, nayo order aavyo che, $priceStr rupiya no, antar $distStr kilometer.$dropStr"
+                }
+                "mr" -> {
+                    val dropStr = if (!dropLocation.isNullOrBlank()) " Drop $dropLocation aahe." else ""
+                    "Hello $driverName, navin order aali aahe, $priceStr rupaye, antar $distStr kilometer.$dropStr"
+                }
+                else -> {
+                    val dropStr = if (!dropLocation.isNullOrBlank()) " Drop location is $dropLocation." else ""
+                    "Hello $driverName, new order received for $priceStr rupees, distance $distStr kilometers.$dropStr"
+                }
+            }
+        }
+
+        fun isTargetRapidoOnly(context: Context): Boolean {
+            val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            return prefs.getBoolean(KEY_TARGET_RAPIDO_ONLY, true)
+        }
+
+        fun setTargetRapidoOnly(context: Context, rapidoOnly: Boolean) {
+            val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            prefs.edit().putBoolean(KEY_TARGET_RAPIDO_ONLY, rapidoOnly).apply()
+        }
+
+        fun isPassActive(context: Context): Boolean {
+            val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            return prefs.getBoolean(KEY_IS_PASS_ACTIVE, false)
+        }
+
+        fun setPassActive(context: Context, active: Boolean) {
+            val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            prefs.edit().putBoolean(KEY_IS_PASS_ACTIVE, active).apply()
+        }
+
+        fun isWakeLockEnabled(context: Context): Boolean {
+            val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            return prefs.getBoolean(KEY_WAKE_LOCK_ENABLED, true)
+        }
+
+        fun setWakeLockEnabled(context: Context, enabled: Boolean) {
+            val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            prefs.edit().putBoolean(KEY_WAKE_LOCK_ENABLED, enabled).apply()
+        }
+
+        @Suppress("DEPRECATION")
+        fun wakeUpScreenAndUnlock(context: Context) {
+            try {
+                val powerManager = context.getSystemService(Context.POWER_SERVICE) as? PowerManager
+                if (powerManager != null) {
+                    val flags = PowerManager.SCREEN_BRIGHT_WAKE_LOCK or
+                            PowerManager.ACQUIRE_CAUSES_WAKEUP or
+                            PowerManager.ON_AFTER_RELEASE
+                    val wakeLock = powerManager.newWakeLock(flags, "AutoAccept:OrderWakeLock")
+                    wakeLock.setReferenceCounted(false)
+                    wakeLock.acquire(5000L)
+                    Log.d(TAG, "Screen wake lock acquired for 5000ms to process incoming order.")
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, "Error acquiring wake lock: ${e.message}", e)
+            }
+        }
+
+        fun testVoiceAnnouncement(context: Context) {
+            if (!isPassActive(context)) {
+                _recentLog.value = "Voice test blocked: Pass is not active."
+                return
+            }
+            val name = getUserName(context)
+            val testMessage = generateOrderAnnouncement(
+                context = context,
+                name = name,
+                price = 120,
+                distanceKm = 1.5f,
+                dropLocation = "Central Station"
+            )
+            instance?.speak(testMessage)
+        }
+
+        // =========================================================================
+        // Parsing Helpers
+        // =========================================================================
+
+        fun extractAllScreenTexts(rootNode: AccessibilityNodeInfo?): List<String> {
+            if (rootNode == null) return emptyList()
+            val texts = mutableListOf<String>()
+            val queue = ArrayDeque<AccessibilityNodeInfo>()
+            queue.add(rootNode)
+            var visited = 0
+
+            while (queue.isNotEmpty() && visited < 150) {
+                val node = queue.removeFirst()
+                visited++
+                val text = node.text?.toString()?.trim()
+                if (!text.isNullOrEmpty()) {
+                    texts.add(text)
+                }
+                val desc = node.contentDescription?.toString()?.trim()
+                if (!desc.isNullOrEmpty() && desc != text) {
+                    texts.add(desc)
+                }
+                for (i in 0 until node.childCount) {
+                    val child = try {
+                        node.getChild(i)
+                    } catch (e: Exception) {
+                        null
+                    }
+                    if (child != null) {
+                        queue.add(child)
+                    }
+                }
+            }
+            return texts
+        }
+
+        fun findBlacklistedKeyword(texts: List<String>, blacklistCsv: String): String? {
+            val keywords = blacklistCsv.split(",")
+                .map { it.trim() }
+                .filter { it.isNotEmpty() }
+
+            if (keywords.isEmpty()) return null
+
+            for (text in texts) {
+                for (keyword in keywords) {
+                    if (text.contains(keyword, ignoreCase = true)) {
+                        return keyword
+                    }
+                }
+            }
+            return null
+        }
+
+        fun extractDistance(texts: List<String>): Float? {
+            for (text in texts) {
+                if (text.contains("pickup", ignoreCase = true) ||
+                    text.contains("away", ignoreCase = true) ||
+                    text.contains("pick up", ignoreCase = true)
+                ) {
+                    val match = DISTANCE_REGEX.find(text)
+                    if (match != null) {
+                        val valueStr = match.groupValues.getOrNull(1)
+                        val value = valueStr?.toFloatOrNull()
+                        if (value != null) return value
+                    }
+                }
+            }
+
+            for (text in texts) {
+                val match = DISTANCE_REGEX.find(text)
+                if (match != null) {
+                    val valueStr = match.groupValues.getOrNull(1)
+                    val value = valueStr?.toFloatOrNull()
+                    if (value != null) return value
+                }
+            }
+            return null
+        }
+
+        fun extractPrice(texts: List<String>): Float? {
+            for (text in texts) {
+                val match = PRICE_REGEX.find(text)
+                if (match != null) {
+                    val str1 = match.groupValues.getOrNull(1)?.takeIf { it.isNotEmpty() }
+                    val str2 = match.groupValues.getOrNull(2)?.takeIf { it.isNotEmpty() }
+                    val price = (str1 ?: str2)?.toFloatOrNull()
+                    if (price != null) return price
+                }
+            }
+            return null
+        }
+
+        fun extractPickupLocation(texts: List<String>): String? {
+            val pickupPrefixRegex = Regex("""(?:pickup(?:\s*from|\s*at)?|from|pick\s*up)\s*[:\-]?\s*(.+)$""", RegexOption.IGNORE_CASE)
+            for ((index, text) in texts.withIndex()) {
+                val match = pickupPrefixRegex.find(text)
+                if (match != null) {
+                    val extracted = match.groupValues.getOrNull(1)?.trim()
+                    if (!extracted.isNullOrBlank() && !extracted.contains("₹") && !extracted.contains("km", ignoreCase = true)) {
+                        return extracted.take(40)
+                    }
+                }
+
+                if (text.equals("Pickup", ignoreCase = true) || text.equals("Pick up", ignoreCase = true) || text.equals("From", ignoreCase = true)) {
+                    val nextText = texts.getOrNull(index + 1)?.trim()
+                    if (!nextText.isNullOrBlank() &&
+                        !nextText.equals("Accept", ignoreCase = true) &&
+                        !nextText.contains("₹") &&
+                        !nextText.contains("km", ignoreCase = true) &&
+                        !nextText.equals("Drop", ignoreCase = true) &&
+                        !nextText.equals("Drop off", ignoreCase = true)
+                    ) {
+                        return nextText.take(40)
+                    }
+                }
+            }
+            return null
+        }
+
+        fun extractDropLocation(texts: List<String>): String? {
+            val dropPrefixRegex = Regex("""(?:drop(?:\s*off|\s*to|\s*at)?|to)\s*[:\-]?\s*(.+)$""", RegexOption.IGNORE_CASE)
+            for ((index, text) in texts.withIndex()) {
+                val match = dropPrefixRegex.find(text)
+                if (match != null) {
+                    val extracted = match.groupValues.getOrNull(1)?.trim()
+                    if (!extracted.isNullOrBlank() && !extracted.contains("₹") && !extracted.contains("km", ignoreCase = true)) {
+                        return extracted.take(40)
+                    }
+                }
+
+                if (text.equals("Drop", ignoreCase = true) || text.equals("Drop off", ignoreCase = true) || text.equals("To", ignoreCase = true)) {
+                    val nextText = texts.getOrNull(index + 1)?.trim()
+                    if (!nextText.isNullOrBlank() &&
+                        !nextText.equals("Accept", ignoreCase = true) &&
+                        !nextText.contains("₹") &&
+                        !nextText.contains("km", ignoreCase = true)
+                    ) {
+                        return nextText.take(40)
+                    }
+                }
+            }
+            return null
+        }
+
+        fun loadLocalLogs(context: Context) {
+            try {
+                val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+                val jsonString = prefs.getString(KEY_LOCAL_RIDE_LOGS, null)
+                if (jsonString.isNullOrBlank()) {
+                    _localRideLogs.value = emptyList()
+                    return
+                }
+                val jsonArray = JSONArray(jsonString)
+                val list = ArrayList<RideLogItem>(jsonArray.length())
+                for (i in 0 until jsonArray.length()) {
+                    val obj = jsonArray.getJSONObject(i)
+                    list.add(
+                        RideLogItem(
+                            id = obj.optString("id", "local_$i"),
+                            userId = obj.optString("userId", "local_driver"),
+                            price = obj.optDouble("price", 0.0).toFloat(),
+                            pickupKm = obj.optDouble("pickupKm", 0.0).toFloat(),
+                            pickupLocation = obj.optString("pickupLocation", "Nearby Pickup"),
+                            dropLocation = obj.optString("dropLocation", "Destination Drop"),
+                            status = obj.optString("status", "IGNORED"),
+                            reason = obj.optString("reason", ""),
+                            sourcePackage = obj.optString("sourcePackage", RAPIDO_CAPTAIN_PACKAGE),
+                            createdMillis = obj.optLong("createdMillis", System.currentTimeMillis())
+                        )
+                    )
+                }
+                _localRideLogs.value = list
+                Log.d(TAG, "Loaded ${list.size} ride logs from local storage.")
+                if (list.isNotEmpty()) {
+                    val restoredEvents = list.take(15).map { item ->
+                        val isAccepted = item.status.equals("ACCEPTED", ignoreCase = true)
+                        ServiceEvent(
+                            id = item.id,
+                            timestamp = item.createdMillis,
+                            type = if (isAccepted) ServiceEventType.ORDER_ACCEPTED else ServiceEventType.ORDER_IGNORED,
+                            title = if (isAccepted) "Order accepted" else "Order ignored",
+                            description = "₹${item.price.toInt()} • ${item.pickupKm} km • ${item.pickupLocation} → ${item.dropLocation}",
+                            details = item.reason,
+                            badge = if (isAccepted) "ACCEPTED" else "FILTERED"
+                        )
+                    }
+                    _serviceEvents.value = restoredEvents
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, "Error loading local logs: ${e.message}", e)
+            }
+        }
+
+        fun logRideLocally(
+            context: Context,
+            price: Float,
+            pickupKm: Float,
+            pickupLocation: String,
+            dropLocation: String,
+            status: String,
+            reason: String,
+            sourcePackage: String = RAPIDO_CAPTAIN_PACKAGE
+        ) {
+            try {
+                val newLog = RideLogItem(
+                    id = "local_${System.currentTimeMillis()}_${(1000..9999).random()}",
+                    userId = "local_driver",
+                    price = price,
+                    pickupKm = pickupKm,
+                    pickupLocation = pickupLocation.ifBlank { "Nearby Pickup" },
+                    dropLocation = dropLocation.ifBlank { "Destination Drop" },
+                    status = status,
+                    reason = reason,
+                    sourcePackage = sourcePackage,
+                    createdMillis = System.currentTimeMillis()
+                )
+                val currentList = _localRideLogs.value
+                val updatedList = listOf(newLog) + currentList.take(99) // Keep last 100 entries
+                _localRideLogs.value = updatedList
+
+                saveLocalLogs(context, updatedList)
+                Log.d(TAG, "Ride logged locally [$status]: ${newLog.id} (Fare: ₹${price.toInt()})")
+
+                // Update order status in Firestore with exponential backoff retry for transient connectivity loss
+                updateOrderStatus(
+                    context = context,
+                    orderId = newLog.id,
+                    status = status,
+                    price = price,
+                    pickupKm = pickupKm,
+                    pickupLocation = pickupLocation,
+                    dropLocation = dropLocation,
+                    reason = reason,
+                    sourcePackage = sourcePackage,
+                    createdMillis = newLog.createdMillis
+                )
+            } catch (e: Exception) {
+                Log.e(TAG, "Error logging ride locally: ${e.message}", e)
+            }
+        }
+
+        private fun saveLocalLogs(context: Context, logs: List<RideLogItem>) {
+            try {
+                val jsonArray = JSONArray()
+                for (item in logs) {
+                    val obj = JSONObject().apply {
+                        put("id", item.id)
+                        put("userId", item.userId)
+                        put("price", item.price.toDouble())
+                        put("pickupKm", item.pickupKm.toDouble())
+                        put("pickupLocation", item.pickupLocation)
+                        put("dropLocation", item.dropLocation)
+                        put("status", item.status)
+                        put("reason", item.reason)
+                        put("sourcePackage", item.sourcePackage)
+                        put("createdMillis", item.createdMillis)
+                    }
+                    jsonArray.put(obj)
+                }
+                val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+                prefs.edit().putString(KEY_LOCAL_RIDE_LOGS, jsonArray.toString()).apply()
+            } catch (e: Exception) {
+                Log.e(TAG, "Error saving local logs to SharedPreferences: ${e.message}", e)
+            }
+        }
+
+        /**
+         * Generic exponential backoff retry mechanism.
+         * Retries the provided suspend block when transient failures occur (such as lost network or Firestore connectivity),
+         * doubling the delay on each failure up to maxDelayMs, with jitter.
+         */
+        suspend fun <T> retryWithExponentialBackoff(
+            maxRetries: Int = FIRESTORE_MAX_RETRIES,
+            initialDelayMs: Long = FIRESTORE_INITIAL_DELAY_MS,
+            maxDelayMs: Long = FIRESTORE_MAX_DELAY_MS,
+            factor: Double = FIRESTORE_BACKOFF_FACTOR,
+            jitterFactor: Double = 0.1,
+            onRetry: ((attempt: Int, nextDelayMs: Long, error: Throwable) -> Unit)? = null,
+            block: suspend (attempt: Int) -> T
+        ): T {
+            var currentDelay = initialDelayMs
+            for (attempt in 1..maxRetries) {
+                try {
+                    return block(attempt)
+                } catch (e: Exception) {
+                    if (e is CancellationException) throw e
+                    if (attempt >= maxRetries) {
+                        try {
+                            Log.e(TAG, "Exhausted all $maxRetries retry attempts: ${e.message}", e)
+                        } catch (_: Throwable) {}
+                        throw e
+                    }
+                    val jitter = ((Math.random() * 2 - 1) * jitterFactor * currentDelay).toLong()
+                    val delayWithJitter = (currentDelay + jitter).coerceIn(0L, maxDelayMs)
+                    onRetry?.invoke(attempt, delayWithJitter, e)
+                    delay(delayWithJitter)
+                    currentDelay = (currentDelay * factor).toLong().coerceAtMost(maxDelayMs)
+                }
+            }
+            error("Retry loop terminated unexpectedly")
+        }
+
+        /**
+         * Updates or writes order status to Firestore with an exponential backoff retry mechanism
+         * when network or Firestore connectivity is temporarily lost.
+         */
+        suspend fun updateOrderStatusWithRetry(
+            context: Context,
+            orderId: String,
+            status: String,
+            price: Float = 0f,
+            pickupKm: Float = 0f,
+            pickupLocation: String = "",
+            dropLocation: String = "",
+            reason: String = "",
+            sourcePackage: String = RAPIDO_CAPTAIN_PACKAGE,
+            createdMillis: Long = System.currentTimeMillis(),
+            maxRetries: Int = FIRESTORE_MAX_RETRIES,
+            initialDelayMs: Long = FIRESTORE_INITIAL_DELAY_MS,
+            maxDelayMs: Long = FIRESTORE_MAX_DELAY_MS
+        ): Result<Unit> {
+            return try {
+                FirebaseHelper.initialize(context)
+                if (FirebaseApp.getApps(context).isEmpty()) {
+                    val msg = "Firebase not initialized. Cannot update order status in Firestore."
+                    Log.w(TAG, msg)
+                    return Result.failure(IllegalStateException(msg))
+                }
+
+                val firestore = FirebaseFirestore.getInstance()
+                val auth = try { FirebaseAuth.getInstance() } catch (e: Exception) { null }
+                val userId = auth?.currentUser?.uid ?: "local_driver"
+
+                val orderData = hashMapOf<String, Any>(
+                    "id" to orderId,
+                    "status" to status,
+                    "price" to price.toDouble(),
+                    "pickupKm" to pickupKm.toDouble(),
+                    "pickupLocation" to pickupLocation.ifBlank { "Nearby Pickup" },
+                    "dropLocation" to dropLocation.ifBlank { "Destination Drop" },
+                    "reason" to reason,
+                    "sourcePackage" to sourcePackage,
+                    "createdMillis" to (if (createdMillis > 0) createdMillis else System.currentTimeMillis()),
+                    "updatedMillis" to System.currentTimeMillis(),
+                    "timestamp" to FieldValue.serverTimestamp(),
+                    "userId" to userId
+                )
+
+                retryWithExponentialBackoff(
+                    maxRetries = maxRetries,
+                    initialDelayMs = initialDelayMs,
+                    maxDelayMs = maxDelayMs,
+                    factor = FIRESTORE_BACKOFF_FACTOR,
+                    onRetry = { attempt, nextDelayMs, error ->
+                        val warning = "Firestore connectivity lost on attempt $attempt while updating order $orderId to '$status': ${error.message}. Retrying in ${nextDelayMs}ms..."
+                        Log.w(TAG, warning)
+                        _recentLog.value = "Firestore retry #$attempt in ${nextDelayMs / 1000}s ($status)"
+                    }
+                ) { attempt ->
+                    Log.d(TAG, "Attempt $attempt: Syncing order $orderId [$status] with Firestore...")
+                    firestore.collection(FIRESTORE_ORDERS_COLLECTION)
+                        .document(orderId)
+                        .set(orderData, SetOptions.merge())
+                        .await()
+                    Log.i(TAG, "Order $orderId status successfully updated to '$status' in Firestore on attempt $attempt")
+                }
+
+                _recentLog.value = "Firestore order status synced: $orderId [$status]"
+                Result.success(Unit)
+            } catch (e: Exception) {
+                if (e is CancellationException) throw e
+                Log.e(TAG, "Failed to update order status to '$status' in Firestore for order $orderId after $maxRetries attempts: ${e.message}", e)
+                Result.failure(e)
+            }
+        }
+
+        /**
+         * Asynchronously updates order status to Firestore using the exponential backoff retry mechanism.
+         * Safe to call from any thread or Coroutine context.
+         */
+        fun updateOrderStatus(
+            context: Context,
+            orderId: String,
+            status: String,
+            price: Float = 0f,
+            pickupKm: Float = 0f,
+            pickupLocation: String = "",
+            dropLocation: String = "",
+            reason: String = "",
+            sourcePackage: String = RAPIDO_CAPTAIN_PACKAGE,
+            createdMillis: Long = System.currentTimeMillis(),
+            onComplete: ((Boolean, Throwable?) -> Unit)? = null
+        ) {
+            serviceScope.launch {
+                val result = updateOrderStatusWithRetry(
+                    context = context,
+                    orderId = orderId,
+                    status = status,
+                    price = price,
+                    pickupKm = pickupKm,
+                    pickupLocation = pickupLocation,
+                    dropLocation = dropLocation,
+                    reason = reason,
+                    sourcePackage = sourcePackage,
+                    createdMillis = createdMillis
+                )
+                withContext(Dispatchers.Main) {
+                    result.fold(
+                        onSuccess = { onComplete?.invoke(true, null) },
+                        onFailure = { onComplete?.invoke(false, it) }
+                    )
+                }
+            }
+        }
+    }
+
+    override fun onServiceConnected() {
+        super.onServiceConnected()
+        FirebaseHelper.initialize(this)
+        instance = this
+        serviceJob.cancel()
+        serviceJob = SupervisorJob()
+        serviceScopeInstance = CoroutineScope(Dispatchers.Main + serviceJob)
+        _isServiceRunning.value = true
+        _recentLog.value = "Smart Clicker active. Monitoring $RAPIDO_CAPTAIN_PACKAGE"
+        logServiceEvent(
+            type = ServiceEventType.MONITORING,
+            title = "Monitoring active",
+            description = "Watching $RAPIDO_CAPTAIN_PACKAGE for incoming ride overlays",
+            details = "Accessibility layer connected",
+            badge = "ONLINE"
+        )
+        Log.i(TAG, "AutoAcceptService connected. Initializing Foreground Service & TextToSpeech...")
+
+        // Start Foreground Service notification to ensure persistence in background
+        startForegroundNotification()
+
+        try {
+            textToSpeech = TextToSpeech(this, this)
+        } catch (e: Exception) {
+            Log.e(TAG, "Error initiating TextToSpeech: ${e.message}", e)
+        }
+    }
+
+    private fun startForegroundNotification() {
+        try {
+            val notificationManager = getSystemService(Context.NOTIFICATION_SERVICE) as? NotificationManager
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O && notificationManager != null) {
+                val channel = NotificationChannel(
+                    NOTIFICATION_CHANNEL_ID,
+                    NOTIFICATION_CHANNEL_NAME,
+                    NotificationManager.IMPORTANCE_LOW
+                ).apply {
+                    description = "Keeps the Rapido Auto-Accept accessibility service running in the background"
+                    setShowBadge(false)
+                }
+                notificationManager.createNotificationChannel(channel)
+            }
+
+            val launchIntent = packageManager.getLaunchIntentForPackage(packageName) ?: Intent(this, MainActivity::class.java)
+            val pendingIntent = PendingIntent.getActivity(
+                this,
+                0,
+                launchIntent,
+                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+            )
+
+            val notification = NotificationCompat.Builder(this, NOTIFICATION_CHANNEL_ID)
+                .setSmallIcon(R.mipmap.ic_launcher)
+                .setContentTitle("Rapido Auto Accept")
+                .setContentText("Service is running in background")
+                .setOngoing(true)
+                .setPriority(NotificationCompat.PRIORITY_LOW)
+                .setContentIntent(pendingIntent)
+                .build()
+
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                try {
+                    startForeground(NOTIFICATION_ID, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE)
+                } catch (e: Throwable) {
+                    startForeground(NOTIFICATION_ID, notification)
+                }
+            } else {
+                startForeground(NOTIFICATION_ID, notification)
+            }
+            Log.i(TAG, "Foreground service notification started successfully.")
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to start foreground service: ${e.message}", e)
+        }
+    }
+
+    fun applyTtsLanguage(lang: String) {
+        if (textToSpeech != null && isTtsInitialized) {
+            val locale = getLocaleForLanguage(lang)
+            val result = textToSpeech?.setLanguage(locale)
+            if (result == TextToSpeech.LANG_MISSING_DATA || result == TextToSpeech.LANG_NOT_SUPPORTED) {
+                Log.w(TAG, "TTS language $lang not supported on device; fallback to default/US")
+                textToSpeech?.language = Locale.US
+            } else {
+                Log.i(TAG, "TTS Language successfully switched to: $locale")
+            }
+        }
+    }
+
+    override fun onInit(status: Int) {
+        if (status == TextToSpeech.SUCCESS) {
+            isTtsInitialized = true
+            applyTtsLanguage(getTtsLanguage(this))
+            textToSpeech?.setSpeechRate(1.0f)
+            textToSpeech?.setPitch(1.0f)
+            Log.i(TAG, "TextToSpeech initialized successfully with language ${getTtsLanguage(this)}.")
+        } else {
+            Log.e(TAG, "TextToSpeech initialization failed with code: $status")
+            isTtsInitialized = false
+        }
+    }
+
+    fun speak(text: String) {
+        if (!isPassActive(this)) {
+            Log.w(TAG, "Pass not active. TTS announcement blocked.")
+            return
+        }
+        if (textToSpeech != null && isTtsInitialized) {
+            try {
+                applyTtsLanguage(getTtsLanguage(this))
+                textToSpeech?.speak(text, TextToSpeech.QUEUE_FLUSH, null, "AutoAccept_${System.currentTimeMillis()}")
+                Log.d(TAG, "TTS announced: $text")
+            } catch (e: Exception) {
+                Log.w(TAG, "Failed to speak TTS message: ${e.message}")
+            }
+        } else {
+            Log.d(TAG, "TTS requested but not ready yet: $text")
+        }
+    }
+
+    override fun onAccessibilityEvent(event: AccessibilityEvent?) {
+        if (event == null) return
+
+        // 1. MASTER SWITCH: Stop immediately if master auto-accept is turned off (Requirement 6)
+        if (!isAutomationEnabled(this)) {
+            return
+        }
+
+        val eventPackage = event.packageName?.toString() ?: ""
+
+        if (eventPackage.isEmpty() ||
+            eventPackage == packageName ||
+            eventPackage == "android" ||
+            eventPackage == "com.android.systemui"
+        ) {
+            return
+        }
+
+        // 2. TARGET PACKAGE FILTER (Requirement 2)
+        if (isTargetRapidoOnly(this) && !ALLOWED_RAPIDO_PACKAGES.contains(eventPackage)) {
+            return
+        }
+
+        // 3. DEBOUNCE COOLDOWN
+        val now = SystemClock.uptimeMillis()
+        if (now - lastClickTimestamp < CLICK_COOLDOWN_MS) {
+            return
+        }
+
+        val rootNode = try {
+            rootInActiveWindow
+        } catch (e: Exception) {
+            Log.w(TAG, "Cannot access root window: ${e.message}")
+            null
+        } ?: return
+
+        val rootPackage = rootNode.packageName?.toString() ?: ""
+        if (isTargetRapidoOnly(this) && !ALLOWED_RAPIDO_PACKAGES.contains(rootPackage)) {
+            return
+        }
+
+        try {
+            processActiveWindow(rootNode, if (rootPackage.isNotEmpty()) rootPackage else eventPackage)
+        } catch (e: Exception) {
+            Log.e(TAG, "Error evaluating active window: ${e.message}", e)
+        }
+    }
+
+    /**
+     * Inspects active window, verifies ride details, applies filter policies, and schedules pending accept.
+     */
+    private fun processActiveWindow(rootNode: AccessibilityNodeInfo, sourcePackage: String) {
+        // Step A: Ensure screen contains active ride order indicators
+        val matchedTokens = evaluateRideScreenContext(rootNode)
+        if (matchedTokens.size < 2) {
+            return
+        }
+
+        // Extract screen text representations
+        val allTexts = extractAllScreenTexts(rootNode)
+        val parsedDistance = extractDistance(allTexts)
+        val parsedPrice = extractPrice(allTexts)
+        val parsedPickup = extractPickupLocation(allTexts) ?: "Nearby Pickup"
+        val parsedDrop = extractDropLocation(allTexts) ?: "Destination Drop"
+
+        val fareInfo = parsedPrice?.let { "₹${it.toInt()}" } ?: "Fare ~"
+        val distInfo = parsedDistance?.let { "${it} km" } ?: "Dist ~"
+
+        // Generate unique ride signature for deduplication (Requirement 7)
+        val rideSignature = generateRideSignature(sourcePackage, parsedPrice, parsedDistance, parsedPickup, parsedDrop)
+
+        // DUPLICATE ACCEPT PROTECTION: Skip if ride was already accepted recently
+        val lastAccepted = recentlyAcceptedRides[rideSignature]
+        if (lastAccepted != null && System.currentTimeMillis() - lastAccepted < DUPLICATE_COOLDOWN_MS) {
+            Log.d(TAG, "Duplicate ride already accepted recently: $rideSignature")
+            return
+        }
+
+        // CONCURRENT OPERATIONS: Prevent multiple pending jobs for the same ride (Requirement 8)
+        if (pendingAcceptJob?.isActive == true) {
+            if (pendingRideSignature == rideSignature) {
+                return
+            } else {
+                Log.d(TAG, "Replacing pending job for $pendingRideSignature with new ride $rideSignature")
+                cancelPendingAcceptInternal("Obsolete ride replaced by new incoming ride")
+            }
+        }
+
+        // 1. VISUAL LOG: Ride Detected event (Requirement 16)
+        logServiceEvent(
+            type = ServiceEventType.RIDE_DETECTED,
+            title = "Ride detected",
+            description = "$fareInfo • $distInfo • $parsedPickup → $parsedDrop",
+            details = "Tokens matched: ${matchedTokens.take(3).joinToString(", ")}",
+            badge = "DETECTED"
+        )
+
+        val isPremium = isPassActive(this)
+        val delayMs: Long
+        val acceptReason: String
+
+        if (!isPremium) {
+            // FREE MODE: Accept-All, 1000-2000ms Delay (Skip all filter checks)
+            delayMs = (1000L..2000L).random()
+            acceptReason = "Auto-Accepted (Free Mode - ${delayMs}ms Delay)"
+            Log.d(TAG, "Free Mode active: Skipping filters, queued with ${delayMs}ms delay")
+        } else {
+            // PREMIUM MODE: High-speed 100-600ms Delay + Conditional Filter Checks
+            delayMs = (100L..600L).random()
+
+            val isBlacklistFilterOn = isBlacklistEnabled(this)
+            val isDistanceFilterOn = isDistanceFilterEnabled(this)
+            val isPriceFilterOn = isPriceFilterEnabled(this)
+            val areAllFiltersOff = !isBlacklistFilterOn && !isDistanceFilterOn && !isPriceFilterOn
+
+            if (areAllFiltersOff) {
+                Log.d(TAG, "Accept All Override active: All individual filters OFF -> accepting without parameter checks.")
+                acceptReason = "Auto-Accepted (Premium Accept All - ${delayMs}ms)"
+            } else {
+                // 1. CONDITIONAL BLACKLIST FILTER
+                if (isBlacklistFilterOn) {
+                    val blacklistCsv = getBlacklistKeywords(this)
+                    val matchedKeyword = findBlacklistedKeyword(allTexts, blacklistCsv)
+                    if (matchedKeyword != null) {
+                        val logMsg = "Order REJECTED: Blacklisted keyword matched ('$matchedKeyword')"
+                        Log.i(TAG, logMsg)
+                        _recentLog.value = logMsg
+                        logServiceEvent(
+                            type = ServiceEventType.ORDER_IGNORED,
+                            title = "Order rejected (Blacklist)",
+                            description = "Location matched '$matchedKeyword' ($fareInfo)",
+                            details = "Drop: $parsedDrop",
+                            badge = "REJECTED"
+                        )
+                        logRideLocally(
+                            context = this,
+                            price = parsedPrice ?: 0f,
+                            pickupKm = parsedDistance ?: 0f,
+                            pickupLocation = parsedPickup,
+                            dropLocation = parsedDrop,
+                            status = "IGNORED",
+                            reason = "Blacklisted location: $matchedKeyword",
+                            sourcePackage = sourcePackage
+                        )
+                        return
+                    }
+                }
+
+                // 2. CONDITIONAL PICKUP DISTANCE FILTER
+                if (isDistanceFilterOn) {
+                    val maxDistance = getMaxDistanceKm(this)
+                    if (maxDistance > 0f) {
+                        if (parsedDistance != null) {
+                            if (parsedDistance > maxDistance) {
+                                val logMsg = "Order REJECTED: Distance ${parsedDistance} km > Max ${maxDistance} km"
+                                Log.i(TAG, logMsg)
+                                _recentLog.value = logMsg
+                                logServiceEvent(
+                                    type = ServiceEventType.ORDER_IGNORED,
+                                    title = "Order rejected (Distance)",
+                                    description = "Pickup ${parsedDistance} km > Max ${maxDistance} km limit",
+                                    details = "Pickup: $parsedPickup",
+                                    badge = "REJECTED"
+                                )
+                                logRideLocally(
+                                    context = this,
+                                    price = parsedPrice ?: 0f,
+                                    pickupKm = parsedDistance,
+                                    pickupLocation = parsedPickup,
+                                    dropLocation = parsedDrop,
+                                    status = "IGNORED",
+                                    reason = "Distance too high (${parsedDistance} km > ${maxDistance} km)",
+                                    sourcePackage = sourcePackage
+                                )
+                                return
+                            }
+                        } else {
+                            Log.d(TAG, "Pickup distance not detected on screen, proceeding")
+                        }
+                    }
+                }
+
+                // 3. CONDITIONAL PRICE / FARE FILTER
+                if (isPriceFilterOn) {
+                    val minPrice = getMinPrice(this)
+                    val maxPrice = getMaxPrice(this)
+                    if (parsedPrice != null) {
+                        if (minPrice > 0f && parsedPrice < minPrice) {
+                            val logMsg = "Order REJECTED: Fare ₹${parsedPrice.toInt()} < Min ₹${minPrice.toInt()}"
+                            Log.i(TAG, logMsg)
+                            _recentLog.value = logMsg
+                            logServiceEvent(
+                                type = ServiceEventType.ORDER_IGNORED,
+                                title = "Order rejected (Fare Low)",
+                                description = "Fare ₹${parsedPrice.toInt()} < Min ₹${minPrice.toInt()}",
+                                details = "Pickup: $parsedPickup",
+                                badge = "REJECTED"
+                            )
+                            logRideLocally(
+                                context = this,
+                                price = parsedPrice,
+                                pickupKm = parsedDistance ?: 0f,
+                                pickupLocation = parsedPickup,
+                                dropLocation = parsedDrop,
+                                status = "IGNORED",
+                                reason = "Price below minimum (₹${parsedPrice.toInt()} < ₹${minPrice.toInt()})",
+                                sourcePackage = sourcePackage
+                            )
+                            return
+                        }
+                        if (maxPrice > 0f && parsedPrice > maxPrice) {
+                            val logMsg = "Order REJECTED: Fare ₹${parsedPrice.toInt()} > Max ₹${maxPrice.toInt()}"
+                            Log.i(TAG, logMsg)
+                            _recentLog.value = logMsg
+                            logServiceEvent(
+                                type = ServiceEventType.ORDER_IGNORED,
+                                title = "Order rejected (Fare High)",
+                                description = "Fare ₹${parsedPrice.toInt()} > Max ₹${maxPrice.toInt()}",
+                                details = "Pickup: $parsedPickup",
+                                badge = "REJECTED"
+                            )
+                            logRideLocally(
+                                context = this,
+                                price = parsedPrice,
+                                pickupKm = parsedDistance ?: 0f,
+                                pickupLocation = parsedPickup,
+                                dropLocation = parsedDrop,
+                                status = "IGNORED",
+                                reason = "Price above maximum (₹${parsedPrice.toInt()} > ₹${maxPrice.toInt()})",
+                                sourcePackage = sourcePackage
+                            )
+                            return
+                        }
+                    } else {
+                        Log.d(TAG, "Fare not detected on screen, proceeding")
+                    }
+                }
+
+                acceptReason = "Auto-Accepted (Filters Passed - ${delayMs}ms)"
+            }
+        }
+
+        // Wake screen if enabled
+        if (isPremium && isWakeLockEnabled(this)) {
+            wakeUpScreenAndUnlock(this)
+        }
+
+        val engineMode = if (isPremium) "[PREMIUM ${delayMs}ms]" else "[FREE ${delayMs}ms]"
+        _recentLog.value = "Accept scheduled in $sourcePackage [$fareInfo | $distInfo] $engineMode"
+        logServiceEvent(
+            type = ServiceEventType.ORDER_QUEUED,
+            title = "Accept scheduled",
+            description = "Tapping in ${delayMs}ms $engineMode",
+            details = "$fareInfo • $distInfo",
+            badge = "SCHEDULED"
+        )
+
+        // Capture all necessary ride information to validate post-delay (Requirement 5)
+        val capturedRide = CapturedRide(
+            sourcePackage = sourcePackage,
+            price = parsedPrice,
+            distanceKm = parsedDistance,
+            pickup = parsedPickup,
+            drop = parsedDrop,
+            signature = rideSignature,
+            acceptReason = acceptReason,
+            isPremium = isPremium,
+            delayMs = delayMs
+        )
+
+        pendingRideSignature = rideSignature
+        pendingAcceptJob = serviceScopeInstance.launch {
+            try {
+                delay(delayMs)
+
+                // 1. MASTER SWITCH CHECK: If turned off while waiting, cancel pending operation (Requirement 6)
+                if (!isAutomationEnabled(this@AutoAcceptService)) {
+                    Log.w(TAG, "Pending accept cancelled: ride changed or validation failed.")
+                    _recentLog.value = "Pending accept cancelled: ride changed or validation failed."
+                    logServiceEvent(
+                        type = ServiceEventType.ORDER_IGNORED,
+                        title = "Accept cancelled",
+                        description = "Pending accept cancelled: ride changed or validation failed.",
+                        details = "Master Switch was turned OFF during wait",
+                        badge = "CANCELLED"
+                    )
+                    return@launch
+                }
+
+                // 2. FRESH ROOT: Obtain fresh AccessibilityNodeInfo/root (Requirement 5 & 9)
+                val freshRoot = try {
+                    rootInActiveWindow
+                } catch (e: Exception) {
+                    null
+                }
+                if (freshRoot == null) {
+                    Log.w(TAG, "Pending accept cancelled: ride changed or validation failed.")
+                    _recentLog.value = "Pending accept cancelled: ride changed or validation failed."
+                    logServiceEvent(
+                        type = ServiceEventType.ORDER_IGNORED,
+                        title = "Accept cancelled",
+                        description = "Pending accept cancelled: ride changed or validation failed.",
+                        details = "Fresh window root is unavailable",
+                        badge = "CANCELLED"
+                    )
+                    return@launch
+                }
+
+                // 3. SOURCE PACKAGE CHECK: Verify source package is still correct (Requirement 2 & 5)
+                val freshPackage = freshRoot.packageName?.toString() ?: ""
+                if (freshPackage.isEmpty() || freshPackage != capturedRide.sourcePackage) {
+                    Log.w(TAG, "Pending accept cancelled: ride changed or validation failed.")
+                    _recentLog.value = "Pending accept cancelled: ride changed or validation failed."
+                    logServiceEvent(
+                        type = ServiceEventType.ORDER_IGNORED,
+                        title = "Accept cancelled",
+                        description = "Pending accept cancelled: ride changed or validation failed.",
+                        details = "Package changed to '$freshPackage' (expected '${capturedRide.sourcePackage}')",
+                        badge = "CANCELLED"
+                    )
+                    return@launch
+                }
+
+                if (isTargetRapidoOnly(this@AutoAcceptService) && !ALLOWED_RAPIDO_PACKAGES.contains(freshPackage)) {
+                    Log.w(TAG, "Pending accept cancelled: ride changed or validation failed.")
+                    _recentLog.value = "Pending accept cancelled: ride changed or validation failed."
+                    return@launch
+                }
+
+                // 4. CONTEXT CHECK: Verify ride context indicators still present
+                val freshTokens = evaluateRideScreenContext(freshRoot)
+                if (freshTokens.size < 2) {
+                    Log.w(TAG, "Pending accept cancelled: ride changed or validation failed.")
+                    _recentLog.value = "Pending accept cancelled: ride changed or validation failed."
+                    logServiceEvent(
+                        type = ServiceEventType.ORDER_IGNORED,
+                        title = "Accept cancelled",
+                        description = "Pending accept cancelled: ride changed or validation failed.",
+                        details = "Ride indicators no longer present on screen",
+                        badge = "CANCELLED"
+                    )
+                    return@launch
+                }
+
+                // 5. FRESH DATA MATCH: Verify fare/distance/pickup/drop context still matches
+                val freshTexts = extractAllScreenTexts(freshRoot)
+                val freshPrice = extractPrice(freshTexts)
+                val freshDistance = extractDistance(freshTexts)
+                val freshPickup = extractPickupLocation(freshTexts) ?: "Nearby Pickup"
+                val freshDrop = extractDropLocation(freshTexts) ?: "Destination Drop"
+
+                // Verify fare if detected earlier
+                if (capturedRide.price != null && freshPrice != null && capturedRide.price != freshPrice) {
+                    Log.w(TAG, "Pending accept cancelled: ride changed or validation failed.")
+                    _recentLog.value = "Pending accept cancelled: ride changed or validation failed."
+                    logServiceEvent(
+                        type = ServiceEventType.ORDER_IGNORED,
+                        title = "Accept cancelled",
+                        description = "Pending accept cancelled: ride changed or validation failed.",
+                        details = "Price changed from ₹${capturedRide.price.toInt()} to ₹${freshPrice.toInt()}",
+                        badge = "CANCELLED"
+                    )
+                    return@launch
+                }
+
+                // Verify distance if detected earlier
+                if (capturedRide.distanceKm != null && freshDistance != null && kotlin.math.abs(capturedRide.distanceKm - freshDistance) > 0.4f) {
+                    Log.w(TAG, "Pending accept cancelled: ride changed or validation failed.")
+                    _recentLog.value = "Pending accept cancelled: ride changed or validation failed."
+                    logServiceEvent(
+                        type = ServiceEventType.ORDER_IGNORED,
+                        title = "Accept cancelled",
+                        description = "Pending accept cancelled: ride changed or validation failed.",
+                        details = "Distance changed from ${capturedRide.distanceKm} km to ${freshDistance} km",
+                        badge = "CANCELLED"
+                    )
+                    return@launch
+                }
+
+                // Verify pickup/drop if neither price nor distance could be detected on fresh screen
+                if (capturedRide.price == null && capturedRide.distanceKm == null) {
+                    val pickupMatched = capturedRide.pickup == "Nearby Pickup" || freshTexts.any { it.contains(capturedRide.pickup, ignoreCase = true) }
+                    val dropMatched = capturedRide.drop == "Destination Drop" || freshTexts.any { it.contains(capturedRide.drop, ignoreCase = true) }
+                    if (!pickupMatched && !dropMatched) {
+                        Log.w(TAG, "Pending accept cancelled: ride changed or validation failed.")
+                        _recentLog.value = "Pending accept cancelled: ride changed or validation failed."
+                        return@launch
+                    }
+                }
+
+                // 6. REVALIDATE USER FILTERS AND SUBSCRIPTION (Requirements 5, 12, 13)
+                val currentIsPremium = isPassActive(this@AutoAcceptService)
+                if (currentIsPremium) {
+                    val isBlacklistFilterOn = isBlacklistEnabled(this@AutoAcceptService)
+                    val isDistanceFilterOn = isDistanceFilterEnabled(this@AutoAcceptService)
+                    val isPriceFilterOn = isPriceFilterEnabled(this@AutoAcceptService)
+                    val areAllFiltersOff = !isBlacklistFilterOn && !isDistanceFilterOn && !isPriceFilterOn
+
+                    if (!areAllFiltersOff) {
+                        if (isBlacklistFilterOn) {
+                            val blacklistCsv = getBlacklistKeywords(this@AutoAcceptService)
+                            val matchedKeyword = findBlacklistedKeyword(freshTexts, blacklistCsv)
+                            if (matchedKeyword != null) {
+                                Log.w(TAG, "Pending accept cancelled: ride changed or validation failed.")
+                                _recentLog.value = "Pending accept cancelled: ride changed or validation failed."
+                                return@launch
+                            }
+                        }
+
+                        if (isDistanceFilterOn) {
+                            val maxDistance = getMaxDistanceKm(this@AutoAcceptService)
+                            val distToCheck = freshDistance ?: capturedRide.distanceKm
+                            if (maxDistance > 0f && distToCheck != null && distToCheck > maxDistance) {
+                                Log.w(TAG, "Pending accept cancelled: ride changed or validation failed.")
+                                _recentLog.value = "Pending accept cancelled: ride changed or validation failed."
+                                return@launch
+                            }
+                        }
+
+                        if (isPriceFilterOn) {
+                            val minPrice = getMinPrice(this@AutoAcceptService)
+                            val maxPrice = getMaxPrice(this@AutoAcceptService)
+                            val priceToCheck = freshPrice ?: capturedRide.price
+                            if (priceToCheck != null) {
+                                if (minPrice > 0f && priceToCheck < minPrice) {
+                                    Log.w(TAG, "Pending accept cancelled: ride changed or validation failed.")
+                                    _recentLog.value = "Pending accept cancelled: ride changed or validation failed."
+                                    return@launch
+                                }
+                                if (maxPrice > 0f && priceToCheck > maxPrice) {
+                                    Log.w(TAG, "Pending accept cancelled: ride changed or validation failed.")
+                                    _recentLog.value = "Pending accept cancelled: ride changed or validation failed."
+                                    return@launch
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // 7. ACCEPT BUTTON VALIDATION: Verify accept button is still present and valid (Requirements 5, 9, 10)
+                val validButton = findAcceptButton(freshRoot)
+                if (validButton == null) {
+                    Log.w(TAG, "Pending accept cancelled: ride changed or validation failed.")
+                    _recentLog.value = "Pending accept cancelled: ride changed or validation failed."
+                    logServiceEvent(
+                        type = ServiceEventType.ORDER_IGNORED,
+                        title = "Accept cancelled",
+                        description = "Pending accept cancelled: ride changed or validation failed.",
+                        details = "Accept button no longer visible or valid on screen",
+                        badge = "CANCELLED"
+                    )
+                    return@launch
+                }
+
+                // 8. FINAL MASTER SWITCH & DUPLICATE CHECK IMMEDIATELY BEFORE CLICKING (Requirements 6 & 7)
+                if (!isAutomationEnabled(this@AutoAcceptService)) {
+                    Log.w(TAG, "Pending accept cancelled: ride changed or validation failed.")
+                    _recentLog.value = "Pending accept cancelled: ride changed or validation failed."
+                    return@launch
+                }
+
+                val recentAcceptedCheck = recentlyAcceptedRides[capturedRide.signature]
+                if (recentAcceptedCheck != null && System.currentTimeMillis() - recentAcceptedCheck < DUPLICATE_COOLDOWN_MS) {
+                    Log.w(TAG, "Pending accept cancelled: ride changed or validation failed.")
+                    _recentLog.value = "Pending accept cancelled: ride changed or validation failed."
+                    return@launch
+                }
+
+                // 9. EXECUTE CLICK / GESTURE (Requirements 10, 11, 16)
+                when (val outcome = executeAcceptClick(validButton)) {
+                    is ClickResult.Success -> {
+                        lastClickTimestamp = SystemClock.uptimeMillis()
+                        recentlyAcceptedRides[capturedRide.signature] = System.currentTimeMillis()
+                        cleanStaleAcceptedRides()
+
+                        val finalFare = (freshPrice ?: capturedRide.price)?.let { "₹${it.toInt()}" } ?: "Fare ~"
+                        val finalDist = (freshDistance ?: capturedRide.distanceKm)?.let { "${it} km" } ?: "Dist ~"
+                        val logMessage = "Accepted order in ${capturedRide.sourcePackage} [$finalFare | $finalDist] $engineMode"
+                        Log.i(TAG, logMessage)
+                        _recentLog.value = logMessage
+
+                        // Log ORDER_ACCEPTED ONLY AFTER SUCCESSFUL CLICK/GESTURE COMPLETION
+                        logServiceEvent(
+                            type = ServiceEventType.ORDER_ACCEPTED,
+                            title = "Order accepted",
+                            description = "Successfully tapped accept button for $finalFare ($finalDist)",
+                            details = "Auto-click executed via ${outcome.method} (${capturedRide.acceptReason})",
+                            badge = if (capturedRide.isPremium) "FAST" else "ACCEPTED"
+                        )
+
+                        // Log ride locally & sync with Firestore
+                        logRideLocally(
+                            context = this@AutoAcceptService,
+                            price = freshPrice ?: capturedRide.price ?: 0f,
+                            pickupKm = freshDistance ?: capturedRide.distanceKm ?: 0f,
+                            pickupLocation = freshPickup.ifBlank { capturedRide.pickup },
+                            dropLocation = freshDrop.ifBlank { capturedRide.drop },
+                            status = "ACCEPTED",
+                            reason = capturedRide.acceptReason,
+                            sourcePackage = capturedRide.sourcePackage
+                        )
+
+                        // Voice Announcer (TTS)
+                        if (capturedRide.isPremium && isTtsEnabled(this@AutoAcceptService)) {
+                            val userName = getUserName(this@AutoAcceptService).ifBlank { DEFAULT_USER_NAME }
+                            val announcement = generateOrderAnnouncement(
+                                context = this@AutoAcceptService,
+                                name = userName,
+                                price = (freshPrice ?: capturedRide.price)?.toInt(),
+                                distanceKm = freshDistance ?: capturedRide.distanceKm,
+                                dropLocation = freshDrop.ifBlank { capturedRide.drop }
+                            )
+                            speak(announcement)
+                        }
+                    }
+                    is ClickResult.Cancelled -> {
+                        Log.w(TAG, "Click cancelled: ${outcome.reason}")
+                        _recentLog.value = "Click cancelled: ${outcome.reason}"
+                        logServiceEvent(
+                            type = ServiceEventType.ORDER_IGNORED,
+                            title = "Accept cancelled",
+                            description = outcome.reason,
+                            badge = "CANCELLED"
+                        )
+                    }
+                    is ClickResult.Failed -> {
+                        Log.e(TAG, "Click failed: ${outcome.reason}")
+                        _recentLog.value = "Click failed: ${outcome.reason}"
+                        logServiceEvent(
+                            type = ServiceEventType.ORDER_IGNORED,
+                            title = "Click failed",
+                            description = outcome.reason,
+                            badge = "FAILED"
+                        )
+                    }
+                }
+            } catch (e: CancellationException) {
+                Log.d(TAG, "Pending accept coroutine cancelled: ${e.message}")
+            } catch (e: Exception) {
+                Log.e(TAG, "Error in pending accept execution: ${e.message}", e)
+            } finally {
+                if (pendingRideSignature == capturedRide.signature) {
+                    pendingRideSignature = null
+                    pendingAcceptJob = null
+                }
+            }
+        }
+    }
+
+    private fun evaluateRideScreenContext(rootNode: AccessibilityNodeInfo): Set<String> {
+        val foundTokens = mutableSetOf<String>()
+        for (token in RIDE_CONTEXT_INDICATORS) {
+            val matchingNodes = try {
+                rootNode.findAccessibilityNodeInfosByText(token)
+            } catch (e: Exception) {
+                emptyList()
+            }
+            if (matchingNodes.isNotEmpty()) {
+                foundTokens.add(token)
+                if (foundTokens.size >= 3) break
+            }
+        }
+        return foundTokens
+    }
+
+    /**
+     * Validates that an accessibility node is visible, enabled, and has valid on-screen dimensions.
+     */
+    private fun isNodeValidAcceptButton(node: AccessibilityNodeInfo): Boolean {
+        if (!node.isEnabled) return false
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N && !node.isVisibleToUser) {
+            return false
+        }
+        val bounds = Rect()
+        try {
+            node.getBoundsInScreen(bounds)
+        } catch (e: Exception) {
+            return false
+        }
+        if (bounds.isEmpty || bounds.width() <= 10 || bounds.height() <= 10) {
+            return false
+        }
+        return true
+    }
+
+    /**
+     * Finds the legitimate accept button in the active ride window, preventing false positives.
+     */
+    private fun findAcceptButton(rootNode: AccessibilityNodeInfo): ValidatedButton? {
+        // 1. Check known View IDs
+        for (viewId in ACCEPT_BUTTON_VIEW_IDS) {
+            val matchingNodes = try {
+                rootNode.findAccessibilityNodeInfosByViewId(viewId)
+            } catch (e: Exception) {
+                emptyList()
+            }
+            for (node in matchingNodes) {
+                if (isNodeValidAcceptButton(node)) {
+                    return ValidatedButton(node, "View ID ($viewId)")
+                }
+            }
+        }
+
+        // 2. Check keywords with strict filtering
+        for (keyword in ACCEPT_BUTTON_KEYWORDS) {
+            val nodesWithText = try {
+                rootNode.findAccessibilityNodeInfosByText(keyword)
+            } catch (e: Exception) {
+                emptyList()
+            }
+            for (node in nodesWithText) {
+                val text = (node.text?.toString() ?: node.contentDescription?.toString() ?: "").trim()
+                if (isValidAcceptText(text, keyword)) {
+                    if (isNodeValidAcceptButton(node)) {
+                        return ValidatedButton(node, "Keyword ('$keyword')")
+                    }
+                }
+            }
+        }
+
+        return null
+    }
+
+    /**
+     * Executes the accept action, preferring ACTION_CLICK on clickable nodes/ancestors before coordinate gestures.
+     */
+    private suspend fun executeAcceptClick(button: ValidatedButton): ClickResult {
+        Log.d(TAG, "Click attempted via ${button.reason}")
+        // 1. Try ACTION_CLICK on the node or its closest clickable ancestor
+        var target: AccessibilityNodeInfo? = button.node
+        var depth = 0
+        while (target != null && !target.isClickable && depth < 4) {
+            target = try { target.parent } catch (e: Exception) { null }
+            depth++
+        }
+
+        if (target != null && target.isClickable && target.isEnabled) {
+            val directSuccess = try {
+                target.performAction(AccessibilityNodeInfo.ACTION_CLICK)
+            } catch (e: Exception) {
+                Log.w(TAG, "Exception during ACTION_CLICK: ${e.message}")
+                false
+            }
+            if (directSuccess) {
+                Log.d(TAG, "Direct click completed via ${button.reason}")
+                return ClickResult.Success("ACTION_CLICK via ${button.reason}")
+            } else {
+                Log.d(TAG, "Direct click returned false, attempting gesture fallback")
+            }
+        }
+
+        // 2. Coordinate gesture fallback
+        return dispatchCoordinateTapSuspending(button.node, button.reason)
+    }
+
+    /**
+     * Dispatches coordinate gesture with GestureResultCallback, awaiting completion or cancellation.
+     */
+    private suspend fun dispatchCoordinateTapSuspending(node: AccessibilityNodeInfo, reason: String): ClickResult {
+        val bounds = Rect()
+        try {
+            node.getBoundsInScreen(bounds)
+        } catch (e: Exception) {
+            return ClickResult.Failed("Failed to read node bounds: ${e.message}")
+        }
+
+        if (bounds.isEmpty || bounds.width() <= 0 || bounds.height() <= 0) {
+            return ClickResult.Failed("Invalid node bounds for gesture")
+        }
+
+        val centerX = bounds.centerX().toFloat()
+        val centerY = bounds.centerY().toFloat()
+
+        val tapPath = Path().apply {
+            moveTo(centerX, centerY)
+        }
+
+        val stroke = GestureDescription.StrokeDescription(tapPath, 0, 80)
+        val gesture = GestureDescription.Builder().addStroke(stroke).build()
+
+        return suspendCancellableCoroutine { cont ->
+            try {
+                val queued = dispatchGesture(gesture, object : GestureResultCallback() {
+                    override fun onCompleted(gestureDescription: GestureDescription?) {
+                        super.onCompleted(gestureDescription)
+                        Log.d(TAG, "Coordinate tap onCompleted at ($centerX, $centerY) via $reason")
+                        if (cont.isActive) {
+                            cont.resume(ClickResult.Success("GESTURE at ($centerX, $centerY)"))
+                        }
+                    }
+
+                    override fun onCancelled(gestureDescription: GestureDescription?) {
+                        super.onCancelled(gestureDescription)
+                        Log.w(TAG, "Coordinate tap onCancelled at ($centerX, $centerY) via $reason")
+                        if (cont.isActive) {
+                            cont.resume(ClickResult.Cancelled("Gesture cancelled by system at ($centerX, $centerY)"))
+                        }
+                    }
+                }, null)
+
+                if (!queued) {
+                    Log.w(TAG, "dispatchGesture returned false")
+                    if (cont.isActive) {
+                        cont.resume(ClickResult.Failed("dispatchGesture returned false"))
+                    }
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, "Error in dispatchGesture: ${e.message}", e)
+                if (cont.isActive) {
+                    cont.resume(ClickResult.Failed("Gesture dispatch exception: ${e.message}"))
+                }
+            }
+        }
+    }
+
+    override fun onInterrupt() {
+        Log.w(TAG, "AutoAcceptService interrupted.")
+        cancelPendingAcceptInternal("Service interrupted by system")
+        _isServiceRunning.value = false
+        _recentLog.value = "Service interrupted by system."
+    }
+
+    override fun onDestroy() {
+        super.onDestroy()
+        cancelPendingAcceptInternal("Service destroyed")
+        serviceJob.cancel()
+        instance = null
+        _isServiceRunning.value = false
+        _recentLog.value = "Service stopped."
+
+        try {
+            stopForeground(STOP_FOREGROUND_REMOVE)
+        } catch (e: Exception) {
+            // Ignore if foreground stop fails on older APIs
+        }
+
+        try {
+            textToSpeech?.stop()
+            textToSpeech?.shutdown()
+            textToSpeech = null
+            isTtsInitialized = false
+            Log.i(TAG, "TextToSpeech successfully shut down.")
+        } catch (e: Exception) {
+            Log.w(TAG, "Error shutting down TextToSpeech: ${e.message}")
+        }
+    }
+}

@@ -1,0 +1,7 @@
+{
+  "name": "Auto Accept",
+  "description": "Auto-Accept Ride Orders app using AccessibilityService and Firebase",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
+
