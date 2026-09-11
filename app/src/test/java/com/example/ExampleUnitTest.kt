@@ -193,6 +193,10 @@ class ExampleUnitTest {
     assertTrue(AutoAcceptService.isValidAcceptText("Swipe to Accept", "Swipe to Accept"))
     assertTrue(AutoAcceptService.isValidAcceptText("Take Order", "Take Order"))
     assertTrue(AutoAcceptService.isValidAcceptText("Confirm Order", "Confirm Order"))
+    assertTrue(AutoAcceptService.isValidAcceptText("Go"))
+    assertTrue(AutoAcceptService.isValidAcceptText("Chalo"))
+    assertTrue(AutoAcceptService.isValidAcceptText("Shuru"))
+    assertTrue(AutoAcceptService.isValidAcceptText("Yes"))
 
     // False positives that MUST be rejected
     assertFalse(AutoAcceptService.isValidAcceptText("Accept terms and conditions", "Accept"))

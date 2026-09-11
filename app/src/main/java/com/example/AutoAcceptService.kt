@@ -403,10 +403,10 @@ class AutoAcceptService : AccessibilityService(), TextToSpeech.OnInitListener {
                 if (text.startsWith(keyword, ignoreCase = true)) return true
             }
 
-            val pattern = Regex("""^(?:swipe\s+to\s+accept|accept(?:\s+(?:order|ride))?|take\s+order|confirm\s+order|go)(?:\s*[\(>→»\d\w\s]*)?$""", RegexOption.IGNORE_CASE)
+            val pattern = Regex("""^(?:swipe\s+to\s+accept|accept(?:\s+(?:order|ride))?|take\s+order|confirm\s+order|go|chalo|shuru|yes)(?:\s*[\(>→»\d\w\s]*)?$""", RegexOption.IGNORE_CASE)
             if (pattern.matches(text)) return true
 
-            val fuzzyRootPattern = Regex("""\b(?:accept|swipe|take|confirm|go)\b""", RegexOption.IGNORE_CASE)
+            val fuzzyRootPattern = Regex("""\b(?:accept|swipe|take|confirm|go|chalo|shuru|yes)\b""", RegexOption.IGNORE_CASE)
             return fuzzyRootPattern.containsMatchIn(text)
         }
 
@@ -1233,19 +1233,16 @@ class AutoAcceptService : AccessibilityService(), TextToSpeech.OnInitListener {
             return
         }
 
-        // 4. USE EVENT SOURCE INSTEAD OF ACTIVE WINDOW:
-        // event.source safely isolates the specific window/overlay that triggered the event,
-        // preventing false triggers from background apps like YouTube or Chrome.
-        val sourceNode = try {
-            event.source
-        } catch (e: Exception) {
-            null
+        // 4. FIND TRUE ROOT OF EVENT'S WINDOW:
+        // Safely ascends to the root of the event's window while blocking background apps
+        var windowRoot = try { event.source } catch (e: Exception) { null }
+        while (windowRoot?.parent != null) {
+            windowRoot = windowRoot.parent
         }
-
-        val targetNode = sourceNode ?: try {
+        val targetNode = windowRoot ?: try {
             rootInActiveWindow
         } catch (e: Exception) {
-            Log.w(TAG, "Cannot access event source or root window: ${e.message}")
+            Log.w(TAG, "Cannot access root window: ${e.message}")
             null
         } ?: return
 
@@ -1502,11 +1499,23 @@ class AutoAcceptService : AccessibilityService(), TextToSpeech.OnInitListener {
                     return@launch
                 }
 
-                // 2. FRESH ROOT: Obtain fresh AccessibilityNodeInfo/root (Requirement 5 & 9)
-                val freshRoot = try {
-                    rootInActiveWindow
+                // 2. FRESH ROOT: Obtain fresh AccessibilityNodeInfo/root (Loop through interactive windows for Rapido overlay)
+                var freshRoot: AccessibilityNodeInfo? = null
+                try {
+                    val activeWindows = windows
+                    for (window in activeWindows) {
+                        val root = window.root
+                        val pkg = root?.packageName?.toString()
+                        if (root != null && pkg != null && ALLOWED_RAPIDO_PACKAGES.contains(pkg)) {
+                            freshRoot = root
+                            break
+                        }
+                    }
+                    if (freshRoot == null) {
+                        freshRoot = rootInActiveWindow
+                    }
                 } catch (e: Exception) {
-                    null
+                    freshRoot = null
                 }
                 if (freshRoot == null) {
                     Log.w(TAG, "Pending accept cancelled: ride changed or validation failed.")
