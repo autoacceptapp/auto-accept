@@ -1340,11 +1340,11 @@ fun OrderHistoryTabContent(
     totalPickupKm: Float,
     isLogsLoading: Boolean
 ) {
-    var selectedFilterTab by rememberSaveable { mutableStateOf(0) } // 0: All, 1: Accepted, 2: Ignored
+    var selectedFilterTab by rememberSaveable { mutableStateOf(1) } // 0: All, 1: Accepted, 2: Ignored
 
     val displayedLogs = remember(selectedFilterTab, rideLogs, acceptedLogs, ignoredLogs) {
         when (selectedFilterTab) {
-            1 -> acceptedLogs
+            1 -> acceptedLogs.take(10)
             2 -> ignoredLogs
             else -> rideLogs
         }
@@ -1565,7 +1565,7 @@ fun OrderHistoryTabContent(
                 onClick = { selectedFilterTab = 1 },
                 text = {
                     Text(
-                        text = "Accepted (${acceptedLogs.size})",
+                        text = "Recent Accepted",
                         fontWeight = if (selectedFilterTab == 1) FontWeight.Bold else FontWeight.Normal,
                         color = if (selectedFilterTab == 1) Emerald400 else Slate400,
                         fontSize = 11.sp
