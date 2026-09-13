@@ -2034,6 +2034,64 @@ fun AutoAcceptDashboardScreen(
     4 -> {
         SettingsTabContent(
             isPassActive = isPassActive,
+            isDistanceFilterOn = isDistanceFilterOn,
+            onDistanceFilterChange = { checked ->
+                if (isPassActive) {
+                    isDistanceFilterOn = checked
+                    AutoAcceptService.setDistanceFilterEnabled(context, checked)
+                }
+            },
+            maxDistanceInput = maxDistanceInput,
+            onMaxDistanceChange = { newValue ->
+                if (isPassActive) {
+                    val filtered = newValue.filter { it.isDigit() || it == '.' }
+                    maxDistanceInput = filtered
+                    filtered.toFloatOrNull()?.let { dist ->
+                        AutoAcceptService.setMaxDistanceKm(context, dist)
+                    }
+                }
+            },
+            isPriceFilterOn = isPriceFilterOn,
+            onPriceFilterChange = { checked ->
+                if (isPassActive) {
+                    isPriceFilterOn = checked
+                    AutoAcceptService.setPriceFilterEnabled(context, checked)
+                }
+            },
+            minPriceInput = minPriceInput,
+            onMinPriceChange = { newValue ->
+                if (isPassActive) {
+                    val filtered = newValue.filter { it.isDigit() }
+                    minPriceInput = filtered
+                    filtered.toFloatOrNull()?.let { p ->
+                        AutoAcceptService.setMinPrice(context, p)
+                    }
+                }
+            },
+            maxPriceInput = maxPriceInput,
+            onMaxPriceChange = { newValue ->
+                if (isPassActive) {
+                    val filtered = newValue.filter { it.isDigit() }
+                    maxPriceInput = filtered
+                    filtered.toFloatOrNull()?.let { p ->
+                        AutoAcceptService.setMaxPrice(context, p)
+                    }
+                }
+            },
+            isBlacklistFilterOn = isBlacklistFilterOn,
+            onBlacklistFilterChange = { checked ->
+                if (isPassActive) {
+                    isBlacklistFilterOn = checked
+                    AutoAcceptService.setBlacklistEnabled(context, checked)
+                }
+            },
+            blacklistInput = blacklistInput,
+            onBlacklistChange = { newValue ->
+                if (isPassActive) {
+                    blacklistInput = newValue
+                    AutoAcceptService.setBlacklistKeywords(context, newValue)
+                }
+            },
             isWakeLockOn = isWakeLockOn,
             onWakeLockChange = { checked ->
                 if (isPassActive) {
@@ -2795,10 +2853,24 @@ private fun ServiceEventItemCard(event: ServiceEvent) {
 
 private data class Quint<A, B, C, D, E>(val first: A, val second: B, val third: C, val fourth: D, val fifth: E)
 
-@OptIn(ExperimentalMaterial3Api::class)
+@OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
 @Composable
 fun SettingsTabContent(
     isPassActive: Boolean,
+    isDistanceFilterOn: Boolean,
+    onDistanceFilterChange: (Boolean) -> Unit,
+    maxDistanceInput: String,
+    onMaxDistanceChange: (String) -> Unit,
+    isPriceFilterOn: Boolean,
+    onPriceFilterChange: (Boolean) -> Unit,
+    minPriceInput: String,
+    onMinPriceChange: (String) -> Unit,
+    maxPriceInput: String,
+    onMaxPriceChange: (String) -> Unit,
+    isBlacklistFilterOn: Boolean,
+    onBlacklistFilterChange: (Boolean) -> Unit,
+    blacklistInput: String,
+    onBlacklistChange: (String) -> Unit,
     isWakeLockOn: Boolean,
     onWakeLockChange: (Boolean) -> Unit,
     isTtsOn: Boolean,
@@ -3231,8 +3303,344 @@ fun SettingsTabContent(
                     )
                 }
 
-                HorizontalDivider(color = Slate800, thickness = 1.dp)
+            }
+        }
 
+        // =========================================================================
+            // 2. DISTANCE FILTER CARD (PREMIUM FEATURE)
+            // =========================================================================
+            Card(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .alpha(if (isPassActive) 1f else 0.5f)
+                    .testTag("distance_filter_card"),
+                shape = RoundedCornerShape(22.dp),
+                colors = CardDefaults.cardColors(containerColor = Slate900),
+                border = BorderStroke(1.dp, Slate800),
+                elevation = CardDefaults.cardElevation(defaultElevation = 2.dp)
+            ) {
+                Column(
+                    modifier = Modifier.padding(18.dp),
+                    verticalArrangement = Arrangement.spacedBy(14.dp)
+                ) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.weight(1f)) {
+                            Box(
+                                modifier = Modifier
+                                    .size(38.dp)
+                                    .clip(CircleShape)
+                                    .background(if (isDistanceFilterOn && isPassActive) EmeraldGlow else Slate800),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.NearMe,
+                                    contentDescription = "Distance Filter Icon",
+                                    tint = if (isDistanceFilterOn && isPassActive) Emerald400 else Slate400,
+                                    modifier = Modifier.size(20.dp)
+                                )
+                            }
+                            Spacer(modifier = Modifier.width(12.dp))
+                            Column {
+                                Text(
+                                    text = "Max Pickup Distance",
+                                    style = MaterialTheme.typography.titleMedium,
+                                    fontWeight = FontWeight.Bold,
+                                    color = Slate50
+                                )
+                                Text(
+                                    text = if (!isPassActive) "PREMIUM ONLY" else if (isDistanceFilterOn) "Active: Accept <= ${maxDistanceInput.ifBlank { "0" }} km" else "Filter Disabled",
+                                    fontSize = 11.sp,
+                                    color = if (!isPassActive) Amber400 else if (isDistanceFilterOn) Emerald400 else Slate400
+                                )
+                            }
+                        }
+
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            if (!isPassActive) {
+                                Surface(
+                                    shape = RoundedCornerShape(8.dp),
+                                    color = Color(0x33F59E0B),
+                                    border = BorderStroke(1.dp, Color(0x66F59E0B))
+                                ) {
+                                    Row(
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        modifier = Modifier.padding(horizontal = 7.dp, vertical = 3.dp)
+                                    ) {
+                                        Icon(
+                                            imageVector = Icons.Default.Lock,
+                                            contentDescription = "Locked",
+                                            tint = Amber400,
+                                            modifier = Modifier.size(11.dp)
+                                        )
+                                        Spacer(modifier = Modifier.width(4.dp))
+                                        Text(
+                                            text = "PREMIUM",
+                                            fontSize = 9.sp,
+                                            fontWeight = FontWeight.ExtraBold,
+                                            color = Amber400
+                                        )
+                                    }
+                                }
+                                Spacer(modifier = Modifier.width(8.dp))
+                            }
+
+                            Switch(
+                                checked = isDistanceFilterOn && isPassActive,
+                                onCheckedChange = { checked ->
+                                    if (isPassActive) {
+                                        onDistanceFilterChange(checked)
+                                    }
+                                },
+                                enabled = isPassActive,
+                                colors = SwitchDefaults.colors(
+                                    checkedThumbColor = Color.White,
+                                    checkedTrackColor = Emerald500,
+                                    uncheckedThumbColor = Slate400,
+                                    uncheckedTrackColor = Slate800,
+                                    disabledUncheckedThumbColor = Slate600,
+                                    disabledUncheckedTrackColor = Slate850
+                                ),
+                                modifier = Modifier.testTag("distance_filter_toggle")
+                            )
+                        }
+                    }
+
+                    OutlinedTextField(
+                        value = maxDistanceInput,
+                        onValueChange = { newValue ->
+                            if (isPassActive) {
+                                onMaxDistanceChange(newValue)
+                            }
+                        },
+                        enabled = isPassActive && isDistanceFilterOn,
+                        label = { Text("Max Distance in Kilometers", color = Slate400) },
+                        placeholder = { Text("e.g. 2.5", color = Slate500) },
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
+                        singleLine = true,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .testTag("max_distance_input"),
+                        shape = RoundedCornerShape(12.dp)
+                    )
+
+                    // Quick Presets
+                    FlowRow(
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        listOf("1.5", "2.0", "3.0", "5.0").forEach { preset ->
+                            FilterChip(
+                                selected = maxDistanceInput == preset && isDistanceFilterOn && isPassActive,
+                                onClick = {
+                                    if (isPassActive && isDistanceFilterOn) {
+                                        onMaxDistanceChange(preset)
+                                    }
+                                },
+                                enabled = isPassActive && isDistanceFilterOn,
+                                label = { Text("$preset km", fontSize = 12.sp) },
+                                colors = FilterChipDefaults.filterChipColors(
+                                    selectedContainerColor = Emerald500,
+                                    selectedLabelColor = Color.White
+                                )
+                            )
+                        }
+                    }
+                }
+            }
+
+            
+        // =========================================================================
+            // 3. PRICE / FARE RANGE FILTER CARD (PREMIUM FEATURE)
+            // =========================================================================
+            Card(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .alpha(if (isPassActive) 1f else 0.5f)
+                    .testTag("price_filter_card"),
+                shape = RoundedCornerShape(22.dp),
+                colors = CardDefaults.cardColors(containerColor = Slate900),
+                border = BorderStroke(1.dp, Slate800),
+                elevation = CardDefaults.cardElevation(defaultElevation = 2.dp)
+            ) {
+                Column(
+                    modifier = Modifier.padding(18.dp),
+                    verticalArrangement = Arrangement.spacedBy(14.dp)
+                ) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.weight(1f)) {
+                            Box(
+                                modifier = Modifier
+                                    .size(38.dp)
+                                    .clip(CircleShape)
+                                    .background(if (isPriceFilterOn && isPassActive) EmeraldGlow else Slate800),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.CurrencyRupee,
+                                    contentDescription = "Price Filter Icon",
+                                    tint = if (isPriceFilterOn && isPassActive) Emerald400 else Slate400,
+                                    modifier = Modifier.size(20.dp)
+                                )
+                            }
+                            Spacer(modifier = Modifier.width(12.dp))
+                            Column {
+                                Text(
+                                    text = "Fare Range Filter",
+                                    style = MaterialTheme.typography.titleMedium,
+                                    fontWeight = FontWeight.Bold,
+                                    color = Slate50
+                                )
+                                Text(
+                                    text = if (!isPassActive) "PREMIUM ONLY" else if (isPriceFilterOn) "Accept ₹${minPriceInput.ifBlank { "0" }} - ₹${maxPriceInput.ifBlank { "∞" }}" else "Filter Disabled",
+                                    fontSize = 11.sp,
+                                    color = if (!isPassActive) Amber400 else if (isPriceFilterOn) Emerald400 else Slate400
+                                )
+                            }
+                        }
+
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            if (!isPassActive) {
+                                Surface(
+                                    shape = RoundedCornerShape(8.dp),
+                                    color = Color(0x33F59E0B),
+                                    border = BorderStroke(1.dp, Color(0x66F59E0B))
+                                ) {
+                                    Row(
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        modifier = Modifier.padding(horizontal = 7.dp, vertical = 3.dp)
+                                    ) {
+                                        Icon(
+                                            imageVector = Icons.Default.Lock,
+                                            contentDescription = "Locked",
+                                            tint = Amber400,
+                                            modifier = Modifier.size(11.dp)
+                                        )
+                                        Spacer(modifier = Modifier.width(4.dp))
+                                        Text(
+                                            text = "PREMIUM",
+                                            fontSize = 9.sp,
+                                            fontWeight = FontWeight.ExtraBold,
+                                            color = Amber400
+                                        )
+                                    }
+                                }
+                                Spacer(modifier = Modifier.width(8.dp))
+                            }
+
+                            Switch(
+                                checked = isPriceFilterOn && isPassActive,
+                                onCheckedChange = { checked ->
+                                    if (isPassActive) {
+                                        onPriceFilterChange(checked)
+                                    }
+                                },
+                                enabled = isPassActive,
+                                colors = SwitchDefaults.colors(
+                                    checkedThumbColor = Color.White,
+                                    checkedTrackColor = Emerald500,
+                                    uncheckedThumbColor = Slate400,
+                                    uncheckedTrackColor = Slate800,
+                                    disabledUncheckedThumbColor = Slate600,
+                                    disabledUncheckedTrackColor = Slate850
+                                ),
+                                modifier = Modifier.testTag("price_filter_toggle")
+                            )
+                        }
+                    }
+
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(12.dp)
+                    ) {
+                        OutlinedTextField(
+                            value = minPriceInput,
+                            onValueChange = { newValue ->
+                                if (isPassActive) {
+                                    onMinPriceChange(newValue)
+                                }
+                            },
+                            enabled = isPassActive && isPriceFilterOn,
+                            label = { Text("Min Fare (₹)", color = Slate400) },
+                            placeholder = { Text("0", color = Slate500) },
+                            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                            singleLine = true,
+                            modifier = Modifier
+                                .weight(1f)
+                                .testTag("min_price_input"),
+                            shape = RoundedCornerShape(12.dp)
+                        )
+
+                        OutlinedTextField(
+                            value = maxPriceInput,
+                            onValueChange = { newValue ->
+                                if (isPassActive) {
+                                    onMaxPriceChange(newValue)
+                                }
+                            },
+                            enabled = isPassActive && isPriceFilterOn,
+                            label = { Text("Max Fare (₹)", color = Slate400) },
+                            placeholder = { Text("0 = No cap", color = Slate500) },
+                            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                            singleLine = true,
+                            modifier = Modifier
+                                .weight(1f)
+                                .testTag("max_price_input"),
+                            shape = RoundedCornerShape(12.dp)
+                        )
+                    }
+
+                    // Presets
+                    FlowRow(
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        listOf("₹40+" to 40f, "₹80+" to 80f, "₹120+" to 120f, "₹200+" to 200f).forEach { (label, minVal) ->
+                            FilterChip(
+                                selected = minPriceInput == minVal.toInt().toString() && isPriceFilterOn && isPassActive,
+                                onClick = {
+                                    if (isPassActive && isPriceFilterOn) {
+                                        onMinPriceChange(minVal.toInt().toString())
+                                    }
+                                },
+                                enabled = isPassActive && isPriceFilterOn,
+                                label = { Text(label, fontSize = 12.sp) },
+                                colors = FilterChipDefaults.filterChipColors(
+                                    selectedContainerColor = Emerald500,
+                                    selectedLabelColor = Color.White
+                                )
+                            )
+                        }
+                    }
+                }
+            }
+
+            
+        
+
+        // =========================================================================
+        // WAIT DELAY CONFIGURATION
+        // =========================================================================
+        Card(
+            modifier = Modifier
+                .fillMaxWidth()
+                .testTag("wait_delay_settings_card"),
+            shape = RoundedCornerShape(22.dp),
+            colors = CardDefaults.cardColors(containerColor = Slate900),
+            border = BorderStroke(1.dp, Slate800),
+            elevation = CardDefaults.cardElevation(defaultElevation = 2.dp)
+        ) {
+            Column(
+                modifier = Modifier.padding(18.dp),
+                verticalArrangement = Arrangement.spacedBy(16.dp)
+            ) {
                 // Accept Wait Delay Section
                 Column(
                     modifier = Modifier.fillMaxWidth(),
