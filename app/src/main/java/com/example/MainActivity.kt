@@ -57,6 +57,7 @@ import androidx.compose.material.icons.filled.Block
 import androidx.compose.material.icons.filled.BugReport
 import androidx.compose.material.icons.filled.Cancel
 import androidx.compose.material.icons.filled.CheckCircle
+import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.CurrencyRupee
 import androidx.compose.material.icons.filled.DirectionsCar
 import androidx.compose.material.icons.filled.FlashOn
@@ -87,6 +88,8 @@ import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.Checkbox
+import androidx.compose.material3.CheckboxDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilterChip
@@ -148,6 +151,7 @@ import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import androidx.lifecycle.viewmodel.compose.viewModel
 import coil.compose.AsyncImage
 import com.example.ui.theme.MyApplicationTheme
 import com.google.android.libraries.identity.googleid.GetGoogleIdOption
@@ -3390,6 +3394,13 @@ fun SettingsTabContent(
     val coroutineScope = rememberCoroutineScope()
     var isCheckingUpdates by remember { mutableStateOf(false) }
 
+    val settingsViewModel: com.example.ui.SettingsViewModel = viewModel()
+    val targetApps by settingsViewModel.targetApps.collectAsStateWithLifecycle()
+    val keywords by settingsViewModel.keywords.collectAsStateWithLifecycle()
+
+    var newKeywordText by remember { mutableStateOf("") }
+    var newAppText by remember { mutableStateOf("") }
+
     Column(
         modifier = modifier
             .fillMaxSize()
@@ -4439,6 +4450,139 @@ fun SettingsTabContent(
                         )
                         Spacer(modifier = Modifier.width(8.dp))
                         Text("Check for Updates", fontWeight = FontWeight.Bold)
+                    }
+                }
+            }
+        }
+
+        // =========================================================================
+        // 6. ADVANCED INTERACTION SETTINGS CARD
+        // =========================================================================
+        Card(
+            modifier = Modifier
+                .fillMaxWidth()
+                .testTag("advanced_settings_card"),
+            shape = RoundedCornerShape(22.dp),
+            colors = CardDefaults.cardColors(containerColor = Slate900),
+            border = BorderStroke(1.dp, Slate800),
+            elevation = CardDefaults.cardElevation(defaultElevation = 2.dp)
+        ) {
+            Column(
+                modifier = Modifier.padding(18.dp),
+                verticalArrangement = Arrangement.spacedBy(14.dp)
+            ) {
+                Text(
+                    text = "Advanced Interaction Rules",
+                    fontSize = 16.sp,
+                    fontWeight = FontWeight.Bold,
+                    color = Color.White
+                )
+
+                Text(
+                    text = "Target Ride Apps:",
+                    fontSize = 14.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    color = Slate300
+                )
+                Column {
+                    for (app in targetApps) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp)
+                        ) {
+                            Checkbox(
+                                checked = app.isEnabled,
+                                onCheckedChange = { checked ->
+                                    settingsViewModel.toggleApp(app.packageName, checked)
+                                    AutoAcceptService.initCache(context)
+                                },
+                                colors = CheckboxDefaults.colors(checkedColor = Emerald500)
+                            )
+                            Text(text = app.packageName, fontSize = 14.sp, color = Slate400, modifier = Modifier.weight(1f))
+                            IconButton(onClick = { settingsViewModel.removeApp(app.packageName); AutoAcceptService.initCache(context) }) {
+                                Icon(imageVector = Icons.Default.Close, contentDescription = "Remove App", tint = Slate500, modifier = Modifier.size(16.dp))
+                            }
+                        }
+                    }
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp)
+                    ) {
+                        OutlinedTextField(
+                            value = newAppText,
+                            onValueChange = { newAppText = it },
+                            placeholder = { Text("Add new package name...", fontSize = 12.sp) },
+                            modifier = Modifier.weight(1f).height(50.dp),
+                            textStyle = androidx.compose.ui.text.TextStyle(fontSize = 12.sp)
+                        )
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Button(
+                            onClick = { 
+                                if (newAppText.isNotBlank()) {
+                                    settingsViewModel.addApp(newAppText.trim())
+                                    newAppText = ""
+                                    AutoAcceptService.initCache(context)
+                                }
+                            },
+                            colors = ButtonDefaults.buttonColors(containerColor = Slate700)
+                        ) {
+                            Text("Add")
+                        }
+                    }
+                }
+
+                Text(
+                    text = "Auto-Accept Button Keywords:",
+                    fontSize = 14.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    color = Slate300,
+                    modifier = Modifier.padding(top = 8.dp)
+                )
+                
+                Column {
+                    for (kw in keywords) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp)
+                        ) {
+                            Checkbox(
+                                checked = kw.isEnabled,
+                                onCheckedChange = { checked ->
+                                    settingsViewModel.toggleKeyword(kw.word, checked)
+                                    AutoAcceptService.initCache(context)
+                                },
+                                colors = CheckboxDefaults.colors(checkedColor = Emerald500)
+                            )
+                            Text(text = kw.word, fontSize = 14.sp, color = Slate400, modifier = Modifier.weight(1f))
+                            IconButton(onClick = { settingsViewModel.removeKeyword(kw.word); AutoAcceptService.initCache(context) }) {
+                                Icon(imageVector = Icons.Default.Close, contentDescription = "Remove Keyword", tint = Slate500, modifier = Modifier.size(16.dp))
+                            }
+                        }
+                    }
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp)
+                    ) {
+                        OutlinedTextField(
+                            value = newKeywordText,
+                            onValueChange = { newKeywordText = it },
+                            placeholder = { Text("Add new keyword...", fontSize = 12.sp) },
+                            modifier = Modifier.weight(1f).height(50.dp),
+                            textStyle = androidx.compose.ui.text.TextStyle(fontSize = 12.sp)
+                        )
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Button(
+                            onClick = { 
+                                if (newKeywordText.isNotBlank()) {
+                                    settingsViewModel.addKeyword(newKeywordText.trim())
+                                    newKeywordText = ""
+                                    AutoAcceptService.initCache(context)
+                                }
+                            },
+                            colors = ButtonDefaults.buttonColors(containerColor = Slate700)
+                        ) {
+                            Text("Add")
+                        }
                     }
                 }
             }

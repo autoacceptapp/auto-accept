@@ -18,6 +18,11 @@ class RideStrikeApp : Application() {
         try {
             ServiceStatusNotificationManager.createNotificationChannel(this)
             ServiceStatusNotificationManager.updateStatus(this)
+            AutoAcceptService.initCache(this)
+            
+            if (AutoAcceptService.isAutomationEnabled(this)) {
+                KeepAliveService.start(this)
+            }
         } catch (e: Exception) {
             Log.e("RideStrikeApp", "Failed to initialize ServiceStatusNotificationManager: ${e.message}", e)
         }

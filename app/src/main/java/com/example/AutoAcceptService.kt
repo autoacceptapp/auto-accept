@@ -11,6 +11,9 @@ import android.content.pm.ServiceInfo
 import android.graphics.Path
 import android.graphics.Rect
 import android.net.Uri
+import android.os.VibrationEffect
+import android.os.Vibrator
+import android.os.VibratorManager
 import android.os.Build
 import android.os.PowerManager
 import android.os.SystemClock
@@ -281,6 +284,8 @@ class AutoAcceptService : AccessibilityService(), TextToSpeech.OnInitListener {
         const val KEY_USER_NAME = "key_user_name"
 
         const val KEY_ACCEPT_DELAY_MS = "key_accept_delay_ms"
+        const val KEY_ENABLED_KEYWORDS = "key_enabled_keywords"
+        const val KEY_ENABLED_APPS = "key_enabled_apps"
         const val DEFAULT_ACCEPT_DELAY_MS = 300L
 
         // Default Filter Values
@@ -599,7 +604,7 @@ class AutoAcceptService : AccessibilityService(), TextToSpeech.OnInitListener {
          * Prevents false positives by strictly verifying button text against negative words and valid patterns.
          * Resiliently matches roots like Accept, Swipe, Take, Confirm, and Go.
          */
-        fun isValidAcceptText(text: String, keyword: String = ""): Boolean {
+        fun isValidAcceptText(context: Context, text: String, keyword: String = ""): Boolean {
             if (text.isBlank() || text.length > 35) return false
             val lower = text.lowercase()
             val falsePositiveWords = listOf("do not", "don't", "terms", "policy", "cash", "upi", "card", "condition", "decline", "reject", "cancel", "privacy", "return")
@@ -608,6 +613,11 @@ class AutoAcceptService : AccessibilityService(), TextToSpeech.OnInitListener {
             if (keyword.isNotBlank()) {
                 if (text.equals(keyword, ignoreCase = true)) return true
                 if (text.startsWith(keyword, ignoreCase = true)) return true
+            }
+
+            val enabledKeywords = getEnabledKeywords(context)
+            if (enabledKeywords.any { text.equals(it, ignoreCase = true) || text.startsWith(it, ignoreCase = true) }) {
+                return true
             }
 
             val pattern = Regex("""^(?:swipe\s+to\s+accept|accept(?:\s+(?:order|ride))?|take\s+order|confirm\s+order|go|chalo|shuru|yes)(?:\s*[\(>→»\d\w\s]*)?$""", RegexOption.IGNORE_CASE)
@@ -631,6 +641,9 @@ class AutoAcceptService : AccessibilityService(), TextToSpeech.OnInitListener {
             prefs.edit().putBoolean(KEY_AUTO_ACCEPT_ENABLED, enabled).apply()
             if (!enabled) {
                 instance?.cancelPendingAcceptInternal("Master switch turned OFF")
+                KeepAliveService.stop(context)
+            } else {
+                KeepAliveService.start(context)
             }
             _recentLog.value = if (enabled) {
                 "Master Switch: ON. Active & listening for orders."
@@ -747,6 +760,36 @@ class AutoAcceptService : AccessibilityService(), TextToSpeech.OnInitListener {
         fun setUserName(context: Context, name: String) {
             val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
             prefs.edit().putString(KEY_USER_NAME, name).apply()
+        }
+
+        var cachedKeywords: Set<String>? = null
+        var cachedApps: Set<String>? = null
+
+        fun initCache(context: Context) {
+            val db = com.example.data.AppDatabase.getDatabase(context.applicationContext)
+            kotlinx.coroutines.GlobalScope.launch(kotlinx.coroutines.Dispatchers.IO) {
+                db.settingsDao().getAllTargetApps().collect { apps ->
+                    if (apps.isNotEmpty()) {
+                        cachedApps = apps.filter { it.isEnabled }.map { it.packageName }.toSet()
+                    }
+                }
+            }
+            kotlinx.coroutines.GlobalScope.launch(kotlinx.coroutines.Dispatchers.IO) {
+                db.settingsDao().getAllKeywords().collect { kws ->
+                    if (kws.isNotEmpty()) {
+                        cachedKeywords = kws.filter { it.isEnabled }.map { it.word }.toSet()
+                    }
+                }
+            }
+        }
+
+        // Advanced Settings: Toggle Keywords and Apps
+        fun getEnabledKeywords(context: Context): Set<String> {
+            return cachedKeywords ?: setOf("Accept", "Swipe to Accept", "Take Order", "Confirm", "स्वीकार")
+        }
+
+        fun getEnabledApps(context: Context): Set<String> {
+            return cachedApps ?: ALLOWED_RAPIDO_PACKAGES
         }
 
         // Multi-Language TTS Language (en, hi, gu, mr)
@@ -874,13 +917,13 @@ class AutoAcceptService : AccessibilityService(), TextToSpeech.OnInitListener {
          * Safely checks if a node belongs to allowed Rapido packages.
          * Prevents parsing text from YouTube, Chrome, System UI, etc.
          */
-        fun isNodeFromAllowedPackage(node: AccessibilityNodeInfo?): Boolean {
+        fun isNodeFromAllowedPackage(context: Context, node: AccessibilityNodeInfo?): Boolean {
             if (node == null) return false
             val pkg = node.packageName?.toString() ?: return false
-            return ALLOWED_RAPIDO_PACKAGES.contains(pkg)
+            return getEnabledApps(context).contains(pkg)
         }
 
-        fun extractAllScreenTexts(rootNode: AccessibilityNodeInfo?): List<String> {
+        fun extractAllScreenTexts(context: Context, rootNode: AccessibilityNodeInfo?): List<String> {
             if (rootNode == null) return emptyList()
             val texts = mutableListOf<String>()
             val queue = ArrayDeque<AccessibilityNodeInfo>()
@@ -893,7 +936,7 @@ class AutoAcceptService : AccessibilityService(), TextToSpeech.OnInitListener {
 
                 // Strict Package Check: Ignore any node belonging to YouTube, Chrome, System UI, etc.
                 val nodePkg = node.packageName?.toString()
-                if (nodePkg != null && !ALLOWED_RAPIDO_PACKAGES.contains(nodePkg)) {
+                if (nodePkg != null && !getEnabledApps(context).contains(nodePkg)) {
                     continue
                 }
 
@@ -1413,8 +1456,34 @@ class AutoAcceptService : AccessibilityService(), TextToSpeech.OnInitListener {
             Log.e(TAG, "Error initiating TextToSpeech: ${e.message}", e)
         }
     }
+    
+    private fun triggerSuccessVibration() {
+        try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                val vibratorManager = getSystemService(Context.VIBRATOR_MANAGER_SERVICE) as VibratorManager
+                val vibrator = vibratorManager.defaultVibrator
+                val effect = VibrationEffect.createWaveform(longArrayOf(0, 100, 50, 100), -1)
+                vibrator.vibrate(effect)
+            } else {
+                @Suppress("DEPRECATION")
+                val vibrator = getSystemService(Context.VIBRATOR_SERVICE) as Vibrator
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                    val effect = VibrationEffect.createWaveform(longArrayOf(0, 100, 50, 100), -1)
+                    vibrator.vibrate(effect)
+                } else {
+                    @Suppress("DEPRECATION")
+                    vibrator.vibrate(longArrayOf(0, 100, 50, 100), -1)
+                }
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to trigger vibration: ${e.message}")
+        }
+    }
 
     private fun startForegroundNotification() {
+        if (isAutomationEnabled(this)) {
+            KeepAliveService.start(this)
+        }
         ServiceStatusNotificationManager.startOrUpdateForeground(this)
     }
 
@@ -1502,7 +1571,7 @@ class AutoAcceptService : AccessibilityService(), TextToSpeech.OnInitListener {
         }
 
         // Strict early return if event does not originate from allowed Rapido packages
-        if (isTargetRapidoOnly(this) && !ALLOWED_RAPIDO_PACKAGES.contains(eventPackage)) {
+        if (isTargetRapidoOnly(this) && !getEnabledApps(this@AutoAcceptService).contains(eventPackage)) {
             return
         }
 
@@ -1526,7 +1595,7 @@ class AutoAcceptService : AccessibilityService(), TextToSpeech.OnInitListener {
         } ?: return
 
         val nodePackage = targetNode.packageName?.toString() ?: eventPackage
-        if (isTargetRapidoOnly(this) && !ALLOWED_RAPIDO_PACKAGES.contains(nodePackage)) {
+        if (isTargetRapidoOnly(this) && !getEnabledApps(this@AutoAcceptService).contains(nodePackage)) {
             return
         }
 
@@ -1555,7 +1624,7 @@ class AutoAcceptService : AccessibilityService(), TextToSpeech.OnInitListener {
         acquireCpuWakeLock(timeoutMs = 15000L, reason = "Incoming ride detected on screen")
 
         // Extract screen text representations
-        val allTexts = extractAllScreenTexts(rootNode)
+        val allTexts = extractAllScreenTexts(this, rootNode)
         val parsedDistance = extractDistance(allTexts)
         val parsedPrice = extractPrice(allTexts)
         val parsedPickup = extractPickupLocation(allTexts) ?: "Nearby Pickup"
@@ -1854,7 +1923,7 @@ class AutoAcceptService : AccessibilityService(), TextToSpeech.OnInitListener {
                     for (window in activeWindows) {
                         val root = window.root
                         val pkg = root?.packageName?.toString()
-                        if (root != null && pkg != null && ALLOWED_RAPIDO_PACKAGES.contains(pkg)) {
+                        if (root != null && pkg != null && getEnabledApps(this@AutoAcceptService).contains(pkg)) {
                             freshRoot = root
                             break
                         }
@@ -1873,7 +1942,7 @@ class AutoAcceptService : AccessibilityService(), TextToSpeech.OnInitListener {
 
                 // 3. SOURCE PACKAGE CHECK: Verify package is still Rapido
                 val freshPackage = freshRoot.packageName?.toString() ?: ""
-                if (isTargetRapidoOnly(this@AutoAcceptService) && !ALLOWED_RAPIDO_PACKAGES.contains(freshPackage)) {
+                if (isTargetRapidoOnly(this@AutoAcceptService) && !getEnabledApps(this@AutoAcceptService).contains(freshPackage)) {
                     Log.w(TAG, "Pending accept cancelled: package is no longer Rapido ($freshPackage)")
                     _recentLog.value = "Pending accept cancelled: package changed"
                     return@launch
@@ -1941,6 +2010,8 @@ class AutoAcceptService : AccessibilityService(), TextToSpeech.OnInitListener {
                             details = "Auto-click executed via ${outcome.method} (${capturedRide.acceptReason})",
                             badge = if (capturedRide.isPremium) "FAST" else "ACCEPTED"
                         )
+                        
+                        triggerSuccessVibration()
 
                         // Log ride locally & sync with Firestore
                         logRideLocally(
@@ -2035,7 +2106,7 @@ class AutoAcceptService : AccessibilityService(), TextToSpeech.OnInitListener {
             // Strict package locking: Ensure matched indicator nodes strictly belong to Rapido
             val validNodes = matchingNodes.filter { node ->
                 val pkg = node.packageName?.toString()
-                pkg == null || ALLOWED_RAPIDO_PACKAGES.contains(pkg)
+                pkg == null || getEnabledApps(this@AutoAcceptService).contains(pkg)
             }
             if (validNodes.isNotEmpty()) {
                 foundTokens.add(token)
@@ -2058,7 +2129,7 @@ class AutoAcceptService : AccessibilityService(), TextToSpeech.OnInitListener {
             val current = queue.poll() ?: break
 
             val nodePkg = current.packageName?.toString()
-            if (nodePkg != null && !ALLOWED_RAPIDO_PACKAGES.contains(nodePkg)) {
+            if (nodePkg != null && !getEnabledApps(this@AutoAcceptService).contains(nodePkg)) {
                 // Ignore any node belonging to YouTube, Chrome, System UI, or non-Rapido apps
                 continue
             }
@@ -2126,7 +2197,7 @@ class AutoAcceptService : AccessibilityService(), TextToSpeech.OnInitListener {
      */
     private fun findAcceptButton(rootNode: AccessibilityNodeInfo): ValidatedButton? {
         // 1. MacroDroid Style Fast-Path: Direct OS-level text matching
-        val exactKeywords = listOf("Accept", "Swipe to Accept", "Take Order", "Confirm", "स्वीकार")
+        val exactKeywords = getEnabledKeywords(this).toList()
         for (keyword in exactKeywords) {
             val directNodes = try {
                 rootNode.findAccessibilityNodeInfosByText(keyword)
@@ -2135,7 +2206,7 @@ class AutoAcceptService : AccessibilityService(), TextToSpeech.OnInitListener {
             for (node in directNodes) {
                 // Strict Package Check to prevent YouTube/Background app triggers
                 val nodePkg = node.packageName?.toString()
-                if (nodePkg != null && !ALLOWED_RAPIDO_PACKAGES.contains(nodePkg)) continue
+                if (nodePkg != null && !getEnabledApps(this@AutoAcceptService).contains(nodePkg)) continue
 
                 if (isNodeValidAcceptButton(node)) {
                     // Parent Delegation (like MacroDroid's smart click bounding box)
@@ -2161,7 +2232,7 @@ class AutoAcceptService : AccessibilityService(), TextToSpeech.OnInitListener {
         // 2. Fuzzy Keyword Matching with Parent Delegation (Roots: "Accept", "Swipe", "Take", "Confirm", "Go")
         for (node in allNodes) {
             val nodePkg = node.packageName?.toString()
-            if (nodePkg != null && !ALLOWED_RAPIDO_PACKAGES.contains(nodePkg)) {
+            if (nodePkg != null && !getEnabledApps(this@AutoAcceptService).contains(nodePkg)) {
                 continue
             }
 
@@ -2171,12 +2242,12 @@ class AutoAcceptService : AccessibilityService(), TextToSpeech.OnInitListener {
             ).filter { it.isNotBlank() }
 
             for (text in textCandidates) {
-                if (isValidAcceptText(text)) {
+                if (isValidAcceptText(this, text)) {
                     if (isNodeValidAcceptButton(node)) {
                         // Parent Delegation (up to 4 levels) to find clickable container
                         val targetClickableNode = findClickableTargetOrAncestor(node, maxLevels = 4)
                         val targetPkg = targetClickableNode.packageName?.toString()
-                        if (targetPkg != null && !ALLOWED_RAPIDO_PACKAGES.contains(targetPkg)) {
+                        if (targetPkg != null && !getEnabledApps(this@AutoAcceptService).contains(targetPkg)) {
                             continue
                         }
 
@@ -2220,13 +2291,13 @@ class AutoAcceptService : AccessibilityService(), TextToSpeech.OnInitListener {
             }
             for (node in matchingNodes) {
                 val nodePkg = node.packageName?.toString()
-                if (nodePkg != null && !ALLOWED_RAPIDO_PACKAGES.contains(nodePkg)) {
+                if (nodePkg != null && !getEnabledApps(this@AutoAcceptService).contains(nodePkg)) {
                     continue
                 }
                 if (isNodeValidAcceptButton(node)) {
                     val targetClickableNode = findClickableTargetOrAncestor(node, maxLevels = 4)
                     val targetPkg = targetClickableNode.packageName?.toString()
-                    if (targetPkg != null && !ALLOWED_RAPIDO_PACKAGES.contains(targetPkg)) {
+                    if (targetPkg != null && !getEnabledApps(this@AutoAcceptService).contains(targetPkg)) {
                         continue
                     }
                     val targetBounds = Rect()
@@ -2274,7 +2345,7 @@ class AutoAcceptService : AccessibilityService(), TextToSpeech.OnInitListener {
 
         for (node in allNodes) {
             val nodePkg = node.packageName?.toString()
-            if (nodePkg != null && !ALLOWED_RAPIDO_PACKAGES.contains(nodePkg)) {
+            if (nodePkg != null && !getEnabledApps(this@AutoAcceptService).contains(nodePkg)) {
                 continue
             }
 
@@ -2318,7 +2389,7 @@ class AutoAcceptService : AccessibilityService(), TextToSpeech.OnInitListener {
 
             val clickableTarget = if (node.isClickable) node else findClickableTargetOrAncestor(node, maxLevels = 3)
             val targetPkg = clickableTarget.packageName?.toString()
-            if (targetPkg != null && !ALLOWED_RAPIDO_PACKAGES.contains(targetPkg)) {
+            if (targetPkg != null && !getEnabledApps(this@AutoAcceptService).contains(targetPkg)) {
                 continue
             }
 
