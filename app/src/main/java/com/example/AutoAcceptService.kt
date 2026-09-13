@@ -262,6 +262,13 @@ class AutoAcceptService : AccessibilityService(), TextToSpeech.OnInitListener {
         const val KEY_WAKE_LOCK_ENABLED = "key_wake_lock_enabled"
         const val KEY_LOCAL_RIDE_LOGS = "key_local_ride_logs"
 
+        const val KEY_DAILY_TRIP_COUNT = "key_daily_trip_count"
+        const val KEY_DAILY_GOAL = "key_daily_goal"
+        const val KEY_LAST_TRIP_DATE = "key_last_trip_date"
+        const val KEY_TRIP_HISTORY = "key_trip_history" // JSON string of last 7 days
+
+
+
         // Firestore Configuration & Exponential Backoff Parameters
         const val FIRESTORE_ORDERS_COLLECTION = "accepted_rides"
         const val FIRESTORE_MAX_RETRIES = 5
@@ -285,6 +292,7 @@ class AutoAcceptService : AccessibilityService(), TextToSpeech.OnInitListener {
         const val KEY_TTS_ENABLED = "key_tts_enabled"
         const val KEY_TTS_LANGUAGE = "key_tts_language"
         const val KEY_USER_NAME = "key_user_name"
+        const val KEY_CUSTOM_SOUND_URI = "key_custom_sound_uri"
 
         const val KEY_ACCEPT_DELAY_MS = "key_accept_delay_ms"
         const val KEY_ENABLED_KEYWORDS = "key_enabled_keywords"
@@ -305,6 +313,15 @@ class AutoAcceptService : AccessibilityService(), TextToSpeech.OnInitListener {
         // Reactive StateFlows observed by MainActivity Compose UI
         private val _isServiceRunning = MutableStateFlow(false)
         val isServiceRunning: StateFlow<Boolean> = _isServiceRunning.asStateFlow()
+
+        private val _dailyTripCount = MutableStateFlow(0)
+        val dailyTripCount: StateFlow<Int> = _dailyTripCount.asStateFlow()
+
+        // List of Pair<DateString, Count>
+        private val _tripHistory = MutableStateFlow<List<Pair<String, Int>>>(emptyList())
+        val tripHistory: StateFlow<List<Pair<String, Int>>> = _tripHistory.asStateFlow()
+
+
 
         private val _recentLog = MutableStateFlow("Service initialized. Ready for Rapido orders.")
         val recentLog: StateFlow<String> = _recentLog.asStateFlow()
@@ -630,8 +647,134 @@ class AutoAcceptService : AccessibilityService(), TextToSpeech.OnInitListener {
             return fuzzyRootPattern.containsMatchIn(text)
         }
 
+
+        // =========================================================================
+        // ROOM DATABASE SYNC (Offline Caching Strategy)
+        // =========================================================================
+        private fun syncSettingsToRoom(context: Context) {
+            kotlin.concurrent.thread {
+                try {
+                    val db = com.example.data.AppDatabase.getDatabase(context)
+                    db.settingsDao().insertFilterSettingsSync(
+                        com.example.data.FilterSettings(
+                            id = 1,
+                            maxDistance = getMaxDistanceKm(context),
+                            minPrice = getMinPrice(context),
+                            maxPrice = getMaxPrice(context),
+                            isDistanceFilterOn = isDistanceFilterEnabled(context),
+                            isPriceFilterOn = isPriceFilterEnabled(context),
+                            isBlacklistFilterOn = isBlacklistEnabled(context),
+                            blacklistKeywords = getBlacklistKeywords(context)
+                        )
+                    )
+                } catch (e: Exception) {
+                    Log.e(TAG, "Failed to sync filter settings to Room: ${e.message}")
+                }
+            }
+        }
+
+        private fun syncTripHistoryToRoom(context: Context, history: List<Pair<String, Int>>) {
+            kotlin.concurrent.thread {
+                try {
+                    val db = com.example.data.AppDatabase.getDatabase(context)
+                    val records = history.map { com.example.data.TripHistoryRecord(it.first, it.second) }
+                    db.settingsDao().clearTripHistorySync()
+                    db.settingsDao().insertTripHistorySync(records)
+                } catch (e: Exception) {
+                    Log.e(TAG, "Failed to sync trip history to Room: ${e.message}")
+                }
+            }
+        }
+
         // =========================================================================
         // SharedPreferences Getters & Setters
+
+        fun getTripHistory(context: Context): List<Pair<String, Int>> {
+            val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            val historyStr = prefs.getString(KEY_TRIP_HISTORY, "") ?: ""
+            if (historyStr.isBlank()) return emptyList()
+            
+            return try {
+                historyStr.split(";").mapNotNull { entry ->
+                    val parts = entry.split(":")
+                    if (parts.size == 2) {
+                        Pair(parts[0], parts[1].toIntOrNull() ?: 0)
+                    } else null
+                }
+            } catch (e: Exception) {
+                emptyList()
+            }
+        }
+
+        private fun saveTripHistory(context: Context, history: List<Pair<String, Int>>) {
+            val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            // Keep only last 7 days
+            val trimmed = history.takeLast(7)
+            val historyStr = trimmed.joinToString(";") { "${it.first}:${it.second}" }
+            prefs.edit().putString(KEY_TRIP_HISTORY, historyStr).apply()
+            _tripHistory.value = trimmed
+            syncTripHistoryToRoom(context, trimmed)
+        }
+
+        fun getDailyGoal(context: Context): Int {
+            val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            return prefs.getInt(KEY_DAILY_GOAL, 10) // Default 10
+        }
+
+        fun setDailyGoal(context: Context, goal: Int) {
+            val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            prefs.edit().putInt(KEY_DAILY_GOAL, goal).apply()
+        }
+
+        fun getDailyTripCount(context: Context): Int {
+            val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            val lastDate = prefs.getString(KEY_LAST_TRIP_DATE, "")
+            val currentDate = java.text.SimpleDateFormat("yyyy-MM-dd", java.util.Locale.getDefault()).format(java.util.Date())
+            
+            if (lastDate != currentDate && !lastDate.isNullOrEmpty()) {
+                // Day changed! Save previous day's count to history before resetting
+                val lastCount = prefs.getInt(KEY_DAILY_TRIP_COUNT, 0)
+                val currentHistory = getTripHistory(context).toMutableList()
+                // Remove if already exists to avoid duplicates
+                currentHistory.removeAll { it.first == lastDate }
+                currentHistory.add(Pair(lastDate, lastCount))
+                saveTripHistory(context, currentHistory)
+                
+                // Reset counter for new day
+                prefs.edit().putInt(KEY_DAILY_TRIP_COUNT, 0).putString(KEY_LAST_TRIP_DATE, currentDate).apply()
+                return 0
+            } else if (lastDate.isNullOrEmpty()) {
+                 prefs.edit().putInt(KEY_DAILY_TRIP_COUNT, 0).putString(KEY_LAST_TRIP_DATE, currentDate).apply()
+                 return 0
+            }
+            return prefs.getInt(KEY_DAILY_TRIP_COUNT, 0)
+        }
+
+
+        
+
+
+        fun syncDailyTripCount(context: Context) {
+            _dailyTripCount.value = getDailyTripCount(context)
+            _tripHistory.value = getTripHistory(context)
+        }
+
+
+
+        fun incrementDailyTripCount(context: Context) {
+            val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            val currentCount = getDailyTripCount(context)
+            val currentDate = java.text.SimpleDateFormat("yyyy-MM-dd", java.util.Locale.getDefault()).format(java.util.Date())
+            
+            
+            prefs.edit()
+                .putInt(KEY_DAILY_TRIP_COUNT, currentCount + 1)
+                .putString(KEY_LAST_TRIP_DATE, currentDate)
+                .apply()
+            _dailyTripCount.value = currentCount + 1
+
+        }
+
         // =========================================================================
 
         fun isAutomationEnabled(context: Context): Boolean {
@@ -680,6 +823,7 @@ class AutoAcceptService : AccessibilityService(), TextToSpeech.OnInitListener {
         fun setDistanceFilterEnabled(context: Context, enabled: Boolean) {
             val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
             prefs.edit().putBoolean(KEY_DISTANCE_FILTER_ENABLED, enabled).apply()
+            syncSettingsToRoom(context)
         }
 
         fun getMaxDistanceKm(context: Context): Float {
@@ -701,6 +845,7 @@ class AutoAcceptService : AccessibilityService(), TextToSpeech.OnInitListener {
         fun setPriceFilterEnabled(context: Context, enabled: Boolean) {
             val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
             prefs.edit().putBoolean(KEY_PRICE_FILTER_ENABLED, enabled).apply()
+            syncSettingsToRoom(context)
         }
 
         fun getMinPrice(context: Context): Float {
@@ -732,6 +877,7 @@ class AutoAcceptService : AccessibilityService(), TextToSpeech.OnInitListener {
         fun setBlacklistEnabled(context: Context, enabled: Boolean) {
             val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
             prefs.edit().putBoolean(KEY_BLACKLIST_ENABLED, enabled).apply()
+            syncSettingsToRoom(context)
         }
 
         fun getBlacklistKeywords(context: Context): String {
@@ -742,6 +888,17 @@ class AutoAcceptService : AccessibilityService(), TextToSpeech.OnInitListener {
         fun setBlacklistKeywords(context: Context, keywords: String) {
             val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
             prefs.edit().putString(KEY_BLACKLIST_KEYWORDS, keywords).apply()
+            syncSettingsToRoom(context)
+        }
+
+fun getCustomSoundUri(context: Context): String? {
+            val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            return prefs.getString(KEY_CUSTOM_SOUND_URI, null)
+        }
+
+        fun setCustomSoundUri(context: Context, uri: String?) {
+            val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            prefs.edit().putString(KEY_CUSTOM_SOUND_URI, uri).apply()
         }
 
         // Voice Announcer (TTS) Toggle & User Name
@@ -1444,6 +1601,19 @@ class AutoAcceptService : AccessibilityService(), TextToSpeech.OnInitListener {
         }
     }
     
+    private fun playSuccessSound() {
+        try {
+            val uriStr = getCustomSoundUri(this)
+            if (!uriStr.isNullOrEmpty()) {
+                val uri = android.net.Uri.parse(uriStr)
+                val ringtone = android.media.RingtoneManager.getRingtone(this, uri)
+                ringtone?.play()
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to play custom sound: ${e.message}")
+        }
+    }
+
     private fun triggerSuccessVibration() {
         try {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
@@ -1828,6 +1998,7 @@ class AutoAcceptService : AccessibilityService(), TextToSpeech.OnInitListener {
                             notificationResetJob?.cancel()
                             recentlyAcceptedRides[capturedRide.signature] = System.currentTimeMillis()
                             cleanStaleAcceptedRides()
+                            incrementDailyTripCount(this@AutoAcceptService)
 
                             val finalFare = capturedRide.price?.let { "₹${it.toInt()}" } ?: "Fare ~"
                             val finalDist = capturedRide.distanceKm?.let { "${it} km" } ?: "Dist ~"
@@ -1844,6 +2015,7 @@ class AutoAcceptService : AccessibilityService(), TextToSpeech.OnInitListener {
                             )
                             
                             triggerSuccessVibration()
+                            playSuccessSound()
                             sendAutoAcceptNotification(
                                 context = this@AutoAcceptService,
                                 title = "Auto-Accepted: $finalFare",

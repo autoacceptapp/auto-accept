@@ -1,4 +1,5 @@
 package com.example
+import androidx.compose.ui.graphics.Brush
 
 import android.Manifest
 import android.content.ComponentName
@@ -29,6 +30,7 @@ import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.PaddingValues
@@ -83,6 +85,7 @@ import androidx.compose.material.icons.filled.Tune
 import androidx.compose.material.icons.filled.Payment
 import androidx.compose.material.icons.filled.Share
 import androidx.compose.material.icons.filled.Warning
+import androidx.compose.material.icons.filled.Info
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
@@ -132,6 +135,8 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalHapticFeedback
+import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontFamily
@@ -190,6 +195,7 @@ private val Slate50 = Color(0xFFF8FAFC)
 
 private val Emerald500 = Color(0xFF10B981)
 private val Emerald400 = Color(0xFF34D399)
+private val Emerald600 = Color(0xFF059669)
 private val EmeraldGlow = Color(0x2E10B981)
 
 private val Cyan500 = Color(0xFF06B6D4)
@@ -778,6 +784,7 @@ fun AutoAcceptDashboardScreen(
     // Voice Announcer (TTS)
     var isTtsOn by remember { mutableStateOf(AutoAcceptService.isTtsEnabled(context)) }
     var ttsLanguage by remember { mutableStateOf(AutoAcceptService.getTtsLanguage(context)) }
+    var customSoundUri by remember { mutableStateOf(AutoAcceptService.getCustomSoundUri(context)) }
     var userNameInput by remember { mutableStateOf(AutoAcceptService.getUserName(context)) }
 
     var isRapidoOnly by remember { mutableStateOf(AutoAcceptService.isTargetRapidoOnly(context)) }
@@ -786,8 +793,38 @@ fun AutoAcceptDashboardScreen(
     // Live Logs & Event Stream
     val serviceLog by AutoAcceptService.recentLog.collectAsStateWithLifecycle()
     val serviceEvents by AutoAcceptService.serviceEvents.collectAsStateWithLifecycle()
+    val totalIgnoredCount = remember(serviceEvents) {
+        serviceEvents.count { it.type == ServiceEventType.ORDER_IGNORED }
+    }
+
+
+
+    val dailyTripCount by AutoAcceptService.dailyTripCount.collectAsStateWithLifecycle()
+var dailyGoal by remember { mutableStateOf(AutoAcceptService.getDailyGoal(context)) }
+    var showGoalEditDialog by remember { mutableStateOf(false) }
+    var goalInputText by remember { mutableStateOf(dailyGoal.toString()) }
+    val tripHistory by AutoAcceptService.tripHistory.collectAsStateWithLifecycle()
+
+    val hapticFeedback = LocalHapticFeedback.current
+    var initialSyncDone by remember { mutableStateOf(false) }
+    var previousTripCount by remember { mutableStateOf(dailyTripCount) }
+
+    LaunchedEffect(dailyTripCount) {
+        if (!initialSyncDone) {
+            initialSyncDone = true
+            previousTripCount = dailyTripCount
+            return@LaunchedEffect
+        }
+        if (dailyTripCount > previousTripCount) {
+            hapticFeedback.performHapticFeedback(HapticFeedbackType.LongPress)
+        }
+        previousTripCount = dailyTripCount
+    }
+
+
 
     val isAcceptAllActive = isMasterSwitchOn && !isDistanceFilterOn && !isPriceFilterOn && !isBlacklistFilterOn
+
 
     // Active bottom navigation tab: 0 = Home (Controls), 1 = Profile (Earnings), 2 = History (Order Logs), 3 = Debug Logs, 4 = Settings
     val initialTargetTab = (context as? Activity)?.intent?.getIntExtra("TARGET_TAB", -1) ?: -1
@@ -795,8 +832,11 @@ fun AutoAcceptDashboardScreen(
         mutableStateOf(if (initialTargetTab in 0..4) initialTargetTab else 0)
     }
 
+
     LaunchedEffect(Unit) {
+        AutoAcceptService.syncDailyTripCount(context)
         val target = (context as? Activity)?.intent?.getIntExtra("TARGET_TAB", -1) ?: -1
+
         if (target in 0..4) {
             selectedTab = target
         }
@@ -826,6 +866,52 @@ fun AutoAcceptDashboardScreen(
     if (showSplash) {
         SplashScreen(onTimeout = { showSplash = false })
         return
+    }
+
+if (showGoalEditDialog) {
+        AlertDialog(
+            onDismissRequest = { showGoalEditDialog = false },
+            containerColor = Slate900,
+            title = {
+                Text("Set Daily Goal", color = Slate50, fontWeight = FontWeight.Bold)
+            },
+            text = {
+                Column {
+                    Text("How many rides do you want to accept today?", color = Slate300, fontSize = 14.sp)
+                    Spacer(modifier = Modifier.height(12.dp))
+                    OutlinedTextField(
+                        value = goalInputText,
+                        onValueChange = { goalInputText = it.filter { char -> char.isDigit() } },
+                        keyboardOptions = androidx.compose.foundation.text.KeyboardOptions(keyboardType = androidx.compose.ui.text.input.KeyboardType.Number),
+                        singleLine = true,
+                        colors = androidx.compose.material3.OutlinedTextFieldDefaults.colors(
+                            focusedTextColor = Slate50,
+                            unfocusedTextColor = Slate300,
+                            focusedBorderColor = Cyan400,
+                            unfocusedBorderColor = Slate700
+                        )
+                    )
+                }
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        val newGoal = goalInputText.toIntOrNull() ?: 10
+                        dailyGoal = if (newGoal < 1) 1 else newGoal
+                        AutoAcceptService.setDailyGoal(context, dailyGoal)
+                        showGoalEditDialog = false
+                    },
+                    colors = ButtonDefaults.buttonColors(containerColor = Cyan400, contentColor = Slate950)
+                ) {
+                    Text("Save", fontWeight = FontWeight.Bold)
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showGoalEditDialog = false }) {
+                    Text("Cancel", color = Slate400)
+                }
+            }
+        )
     }
 
     Scaffold(
@@ -1835,6 +1921,125 @@ fun AutoAcceptDashboardScreen(
             )
 
             // =========================================================================
+// =========================================================================
+// =========================================================================
+            // DAILY GOAL CARD
+            // =========================================================================
+            Card(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .testTag("daily_goal_card")
+                    .clickable { showGoalEditDialog = true },
+                shape = RoundedCornerShape(22.dp),
+                colors = CardDefaults.cardColors(containerColor = Slate900),
+                border = BorderStroke(1.dp, Slate800),
+                elevation = CardDefaults.cardElevation(defaultElevation = 2.dp)
+            ) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(18.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(
+                            text = "Daily Goal",
+                            style = MaterialTheme.typography.titleMedium,
+                            fontWeight = FontWeight.Bold,
+                            color = Slate50
+                        )
+                        Spacer(modifier = Modifier.height(4.dp))
+                        Text(
+                            text = "$dailyTripCount / $dailyGoal rides accepted",
+                            fontSize = 13.sp,
+                            color = Slate400
+                        )
+                        Spacer(modifier = Modifier.height(8.dp))
+                        Text(
+                            text = "Tap to set your target for today",
+                            fontSize = 11.sp,
+                            color = Cyan400,
+                            fontWeight = FontWeight.SemiBold
+                        )
+                    }
+                    
+                    val progress = if (dailyGoal > 0) (dailyTripCount.toFloat() / dailyGoal).coerceIn(0f, 1f) else 0f
+                    Box(contentAlignment = Alignment.Center, modifier = Modifier.size(72.dp)) {
+                        CircularProgressIndicator(
+                            progress = { 1f },
+                            modifier = Modifier.fillMaxSize(),
+                            color = Slate800,
+                            strokeWidth = 6.dp,
+                            strokeCap = androidx.compose.ui.graphics.StrokeCap.Round
+                        )
+                        CircularProgressIndicator(
+                            progress = { progress },
+                            modifier = Modifier.fillMaxSize(),
+                            color = if (progress >= 1f) Emerald400 else Cyan400,
+                            strokeWidth = 6.dp,
+                            strokeCap = androidx.compose.ui.graphics.StrokeCap.Round
+                        )
+                        Text(
+                            text = "${(progress * 100).toInt()}%",
+                            fontSize = 14.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = Slate50
+                        )
+                    }
+                }
+            }
+
+            // BATTERY OPTIMIZATION WARNING
+            // =========================================================================
+            if (!isBatteryOptimizationIgnored && isAccessibilityEnabled) {
+                Card(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .testTag("battery_warning_card"),
+                    shape = RoundedCornerShape(16.dp),
+                    colors = CardDefaults.cardColors(containerColor = Color(0x1AF59E0B)),
+                    border = BorderStroke(1.dp, Color(0x4DF59E0B))
+                ) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(16.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(12.dp)
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Warning,
+                            contentDescription = "Warning",
+                            tint = Amber500,
+                            modifier = Modifier.size(28.dp)
+                        )
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                text = "Battery Optimization Enabled",
+                                style = MaterialTheme.typography.titleSmall,
+                                fontWeight = FontWeight.Bold,
+                                color = Amber400
+                            )
+                            Text(
+                                text = "This may cause Android to aggressively kill the auto-accept service in the background. Please unrestrict battery usage.",
+                                fontSize = 11.sp,
+                                lineHeight = 14.sp,
+                                color = Slate200
+                            )
+                        }
+                        Button(
+                            onClick = { openBatteryOptimizationSettings(context) },
+                            colors = ButtonDefaults.buttonColors(containerColor = Amber500, contentColor = Slate950),
+                            shape = RoundedCornerShape(10.dp),
+                            contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp)
+                        ) {
+                            Text("Fix", fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                        }
+                    }
+                }
+            }
+
             // 1. MASTER AUTO-ACCEPT SWITCH CARD
             // =========================================================================
             Card(
@@ -1976,6 +2181,154 @@ fun AutoAcceptDashboardScreen(
             // =========================================================================
             // 5. REAL-TIME VISUAL LOG VIEW (Events & Telemetry)
             // =========================================================================
+            // DAILY TRIP COUNTER WIDGET
+            // =========================================================================
+            Card(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .testTag("daily_trip_counter_card"),
+                shape = RoundedCornerShape(22.dp),
+                colors = CardDefaults.cardColors(containerColor = Slate900),
+                border = BorderStroke(1.dp, Slate800),
+                elevation = CardDefaults.cardElevation(defaultElevation = 2.dp)
+            ) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(18.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Box(
+                            modifier = Modifier
+                                .size(46.dp)
+                                .clip(CircleShape)
+                                .background(Color(0x333B82F6)),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.DirectionsCar,
+                                contentDescription = "Car Icon",
+                                tint = Color(0xFF60A5FA),
+                                modifier = Modifier.size(24.dp)
+                            )
+                        }
+                        Spacer(modifier = Modifier.width(16.dp))
+                        Column {
+                            Text(
+                                text = "Daily Trip Counter",
+                                style = MaterialTheme.typography.titleMedium,
+                                fontWeight = FontWeight.Bold,
+                                color = Slate50
+                            )
+                            Text(
+                                text = "Auto-resets at midnight",
+                                fontSize = 12.sp,
+                                color = Slate400
+                            )
+                        }
+                    }
+                    
+                    Text(
+                        text = dailyTripCount.toString(),
+                        style = MaterialTheme.typography.headlineMedium,
+                        fontWeight = FontWeight.ExtraBold,
+                        color = Color.White
+                    )
+                }
+            }
+
+            // =========================================================================
+            // 7-DAY TRIP HISTORY CHART (Native Compose Chart)
+            // =========================================================================
+                Card(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(200.dp)
+                        .testTag("weekly_chart_card"),
+                    shape = RoundedCornerShape(22.dp),
+                    colors = CardDefaults.cardColors(containerColor = Slate900),
+                    border = BorderStroke(1.dp, Slate800),
+                    elevation = CardDefaults.cardElevation(defaultElevation = 2.dp)
+                ) {
+                    Column(
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .padding(18.dp)
+                    ) {
+                        Text(
+                            text = "7-Day History",
+                            style = MaterialTheme.typography.titleMedium,
+                            fontWeight = FontWeight.Bold,
+                            color = Slate50
+                        )
+                        Spacer(modifier = Modifier.height(16.dp))
+                        
+                        // Combine history + today
+                        val chartData = remember(tripHistory, dailyTripCount) {
+                            val sdf = java.text.SimpleDateFormat("MM/dd", java.util.Locale.getDefault())
+                            val list = tripHistory.map { 
+                                val parsed = java.text.SimpleDateFormat("yyyy-MM-dd", java.util.Locale.getDefault()).parse(it.first)
+                                val label = parsed?.let { d -> sdf.format(d) } ?: it.first
+                                Pair(label, it.second) 
+                            }.toMutableList()
+                            list.add(Pair("Today", dailyTripCount))
+                            list.takeLast(7)
+                        }
+
+                        val maxVal = (chartData.maxOfOrNull { it.second } ?: 0).coerceAtLeast(1)
+
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .weight(1f),
+                            horizontalArrangement = Arrangement.SpaceEvenly,
+                            verticalAlignment = Alignment.Bottom
+                        ) {
+                            chartData.forEach { (label, count) ->
+                                Column(
+                                    horizontalAlignment = Alignment.CenterHorizontally,
+                                    verticalArrangement = Arrangement.Bottom,
+                                    modifier = Modifier.fillMaxHeight()
+                                ) {
+                                    val heightPercent = count.toFloat() / maxVal
+                                    Box(
+                                        modifier = Modifier
+                                            .weight(1f, fill = false)
+                                            .fillMaxHeight(heightPercent)
+                                            .width(28.dp)
+                                            .clip(RoundedCornerShape(topStart = 6.dp, topEnd = 6.dp))
+                                            .background(
+                                                brush = Brush.verticalGradient(
+                                                    colors = listOf(Emerald400, Emerald600)
+                                                )
+                                            )
+                                    ) {
+                                        if (count > 0) {
+                                            Text(
+                                                text = count.toString(),
+                                                color = Color.White,
+                                                fontSize = 10.sp,
+                                                fontWeight = FontWeight.Bold,
+                                                modifier = Modifier.align(Alignment.TopCenter).padding(top = 4.dp)
+                                            )
+                                        }
+                                    }
+                                    Spacer(modifier = Modifier.height(6.dp))
+                                    Text(
+                                        text = label,
+                                        fontSize = 10.sp,
+                                        color = Slate400,
+                                        maxLines = 1
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
+
+            // =========================================================================
             VisualLogViewCard(
                 serviceEvents = serviceEvents,
                 rawServiceLog = serviceLog,
@@ -2106,6 +2459,13 @@ fun AutoAcceptDashboardScreen(
                     AutoAcceptService.setTtsEnabled(context, checked)
                 }
             },
+            customSoundUri = customSoundUri,
+            onCustomSoundChange = { uri ->
+                if (isPassActive) {
+                    customSoundUri = uri
+                    AutoAcceptService.setCustomSoundUri(context, uri)
+                }
+            },
             userNameInput = userNameInput,
             onUserNameChange = { newName ->
                 if (isPassActive) {
@@ -2155,7 +2515,8 @@ fun AutoAcceptDashboardScreen(
             },
             onUpdateAvailable = { updateInfo ->
                 updateInfoToPrompt = updateInfo
-            }
+            },
+            ignoredCount = totalIgnoredCount
         )
     }
 }
@@ -2855,6 +3216,22 @@ private data class Quint<A, B, C, D, E>(val first: A, val second: B, val third: 
 
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
 @Composable
+fun SettingsSectionHeader(title: String, showDivider: Boolean = true) {
+    Column(modifier = Modifier.fillMaxWidth().padding(horizontal = 4.dp, vertical = 4.dp)) {
+        if (showDivider) androidx.compose.material3.HorizontalDivider(color = Slate800, thickness = 1.dp)
+        Spacer(modifier = Modifier.height(16.dp))
+        Text(
+            text = title,
+            style = MaterialTheme.typography.titleSmall,
+            color = Cyan400,
+            fontWeight = FontWeight.Bold,
+            letterSpacing = 1.2.sp
+        )
+    }
+}
+
+@OptIn(androidx.compose.material3.ExperimentalMaterial3Api::class, androidx.compose.foundation.layout.ExperimentalLayoutApi::class)
+@Composable
 fun SettingsTabContent(
     isPassActive: Boolean,
     isDistanceFilterOn: Boolean,
@@ -2875,6 +3252,8 @@ fun SettingsTabContent(
     onWakeLockChange: (Boolean) -> Unit,
     isTtsOn: Boolean,
     onTtsChange: (Boolean) -> Unit,
+    customSoundUri: String?,
+    onCustomSoundChange: (String?) -> Unit,
     userNameInput: String,
     onUserNameChange: (String) -> Unit,
     ttsLanguage: String,
@@ -2896,11 +3275,47 @@ fun SettingsTabContent(
     onOpenOverlay: () -> Unit,
     onRefreshPermissions: () -> Unit,
     onUpdateAvailable: (GitHubUpdateManager.UpdateInfo) -> Unit,
+    ignoredCount: Int,
     modifier: Modifier = Modifier
 ) {
     val context = LocalContext.current
     val coroutineScope = rememberCoroutineScope()
     var isCheckingUpdates by remember { mutableStateOf(false) }
+
+    var showDistanceInfo by remember { mutableStateOf(false) }
+    var showPriceInfo by remember { mutableStateOf(false) }
+    var showRapidoInfo by remember { mutableStateOf(false) }
+
+    if (showDistanceInfo) {
+        AlertDialog(
+            onDismissRequest = { showDistanceInfo = false },
+            containerColor = Slate900,
+            title = { Text("Distance Filter", color = Slate50, fontWeight = FontWeight.Bold) },
+            text = { Text("Automatically ignores rides that have a pickup location further than your specified distance. This prevents you from wasting time driving far just to pick up a passenger.", color = Slate300, fontSize = 14.sp) },
+            confirmButton = { TextButton(onClick = { showDistanceInfo = false }) { Text("Got it", color = Cyan400) } }
+        )
+    }
+    
+    if (showPriceInfo) {
+        AlertDialog(
+            onDismissRequest = { showPriceInfo = false },
+            containerColor = Slate900,
+            title = { Text("Price & Fare Filter", color = Slate50, fontWeight = FontWeight.Bold) },
+            text = { Text("Only accepts orders where the fare amount falls between your minimum and maximum range. Orders below the minimum or above the maximum are automatically skipped.", color = Slate300, fontSize = 14.sp) },
+            confirmButton = { TextButton(onClick = { showPriceInfo = false }) { Text("Got it", color = Cyan400) } }
+        )
+    }
+
+    if (showRapidoInfo) {
+        AlertDialog(
+            onDismissRequest = { showRapidoInfo = false },
+            containerColor = Slate900,
+            title = { Text("Strict Rapido Filter", color = Slate50, fontWeight = FontWeight.Bold) },
+            text = { Text("Ensures the bot only interacts with the official Rapido app. When enabled, it will verify the screen package name and ignore popups or buttons from other applications.", color = Slate300, fontSize = 14.sp) },
+            confirmButton = { TextButton(onClick = { showRapidoInfo = false }) { Text("Got it", color = Cyan400) } }
+        )
+    }
+
 
     val settingsViewModel: com.example.ui.SettingsViewModel = viewModel()
     val targetApps by settingsViewModel.targetApps.collectAsStateWithLifecycle()
@@ -2908,6 +3323,15 @@ fun SettingsTabContent(
 
     var newKeywordText by remember { mutableStateOf("") }
     var newAppText by remember { mutableStateOf("") }
+    val soundPickerLauncher = rememberLauncherForActivityResult(
+        contract = androidx.activity.result.contract.ActivityResultContracts.StartActivityForResult()
+    ) { result ->
+        if (result.resultCode == android.app.Activity.RESULT_OK) {
+            val uri: android.net.Uri? = result.data?.getParcelableExtra(android.media.RingtoneManager.EXTRA_RINGTONE_PICKED_URI)
+            onCustomSoundChange(uri?.toString())
+        }
+    }
+
 
     Column(
         modifier = modifier
@@ -2918,6 +3342,7 @@ fun SettingsTabContent(
         verticalArrangement = Arrangement.spacedBy(16.dp)
     ) {
         // =========================================================================
+        SettingsSectionHeader("PERMISSIONS & REQUIREMENTS", showDivider = false)
         // 1. SYSTEM PERMISSIONS CARD
         // =========================================================================
         Card(
@@ -3229,6 +3654,7 @@ fun SettingsTabContent(
         }
 
         // =========================================================================
+        SettingsSectionHeader("CORE AUTOMATION")
         // 2. AUTO ACCEPT SERVICE & DELAY CONFIGURATION
         // =========================================================================
         Card(
@@ -3307,6 +3733,7 @@ fun SettingsTabContent(
         }
 
         // =========================================================================
+        SettingsSectionHeader("SMART FILTERS (PREMIUM)")
             // 2. DISTANCE FILTER CARD (PREMIUM FEATURE)
             // =========================================================================
             Card(
@@ -3345,12 +3772,17 @@ fun SettingsTabContent(
                             }
                             Spacer(modifier = Modifier.width(12.dp))
                             Column {
-                                Text(
-                                    text = "Max Pickup Distance",
-                                    style = MaterialTheme.typography.titleMedium,
-                                    fontWeight = FontWeight.Bold,
-                                    color = Slate50
-                                )
+                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                    Text(
+                                        text = "Max Pickup Distance",
+                                        style = MaterialTheme.typography.titleMedium,
+                                        fontWeight = FontWeight.Bold,
+                                        color = Slate50
+                                    )
+                                    IconButton(onClick = { showDistanceInfo = true }, modifier = Modifier.size(28.dp).padding(start = 4.dp)) {
+                                        Icon(Icons.Default.Info, contentDescription = "Info", tint = Cyan400, modifier = Modifier.size(16.dp))
+                                    }
+                                }
                                 Text(
                                     text = if (!isPassActive) "PREMIUM ONLY" else if (isDistanceFilterOn) "Active: Accept <= ${maxDistanceInput.ifBlank { "0" }} km" else "Filter Disabled",
                                     fontSize = 11.sp,
@@ -3492,12 +3924,17 @@ fun SettingsTabContent(
                             }
                             Spacer(modifier = Modifier.width(12.dp))
                             Column {
-                                Text(
-                                    text = "Fare Range Filter",
-                                    style = MaterialTheme.typography.titleMedium,
-                                    fontWeight = FontWeight.Bold,
-                                    color = Slate50
-                                )
+                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                    Text(
+                                        text = "Fare Range Filter",
+                                        style = MaterialTheme.typography.titleMedium,
+                                        fontWeight = FontWeight.Bold,
+                                        color = Slate50
+                                    )
+                                    IconButton(onClick = { showPriceInfo = true }, modifier = Modifier.size(28.dp).padding(start = 4.dp)) {
+                                        Icon(Icons.Default.Info, contentDescription = "Info", tint = Cyan400, modifier = Modifier.size(16.dp))
+                                    }
+                                }
                                 Text(
                                     text = if (!isPassActive) "PREMIUM ONLY" else if (isPriceFilterOn) "Accept ₹${minPriceInput.ifBlank { "0" }} - ₹${maxPriceInput.ifBlank { "∞" }}" else "Filter Disabled",
                                     fontSize = 11.sp,
@@ -3888,6 +4325,7 @@ fun SettingsTabContent(
         }
 
         // =========================================================================
+        SettingsSectionHeader("VOICE & ALERTS")
         // 3. VOICE ANNOUNCER (TTS) CARD
         // =========================================================================
         Card(
@@ -4098,9 +4536,64 @@ fun SettingsTabContent(
                     )
                     Spacer(modifier = Modifier.width(8.dp))
                     Text("Test Voice Announcement", fontWeight = FontWeight.Bold)
+                }            }
+        }
+
+        // =========================================================================
+        // CUSTOM NOTIFICATION SOUND
+        // =========================================================================
+        Card(
+            modifier = Modifier
+                .fillMaxWidth()
+                .testTag("notification_sound_card"),
+            shape = RoundedCornerShape(20.dp),
+            colors = CardDefaults.cardColors(containerColor = Slate900),
+            border = BorderStroke(1.dp, Slate800)
+        ) {
+            Column(
+                modifier = Modifier.padding(16.dp),
+                verticalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(
+                            text = "Custom Accept Sound",
+                            style = MaterialTheme.typography.bodyMedium,
+                            fontWeight = FontWeight.SemiBold,
+                            color = Slate50
+                        )
+                        Text(
+                            text = if (customSoundUri.isNullOrEmpty()) "Default System Sound" else "Custom Ringtone Selected",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = if (customSoundUri.isNullOrEmpty()) Slate400 else Emerald400
+                        )
+                    }
+                    Button(
+                        onClick = {
+                            val intent = android.content.Intent(android.media.RingtoneManager.ACTION_RINGTONE_PICKER).apply {
+                                putExtra(android.media.RingtoneManager.EXTRA_RINGTONE_TYPE, android.media.RingtoneManager.TYPE_NOTIFICATION)
+                                putExtra(android.media.RingtoneManager.EXTRA_RINGTONE_SHOW_DEFAULT, true)
+                                putExtra(android.media.RingtoneManager.EXTRA_RINGTONE_SHOW_SILENT, true)
+                                customSoundUri?.let {
+                                    putExtra(android.media.RingtoneManager.EXTRA_RINGTONE_EXISTING_URI, android.net.Uri.parse(it))
+                                }
+                            }
+                            soundPickerLauncher.launch(intent)
+                        },
+                        shape = RoundedCornerShape(12.dp),
+                        colors = ButtonDefaults.buttonColors(containerColor = Slate800, contentColor = Slate200),
+                        contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp)
+                    ) {
+                        Text("Select", fontSize = 12.sp)
+                    }
                 }
             }
         }
+
 
         // =========================================================================
         // 4. STRICT RAPIDO FILTER CARD
@@ -4123,12 +4616,17 @@ fun SettingsTabContent(
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     Column(modifier = Modifier.weight(1f)) {
-                        Text(
-                            text = "Strict Rapido Filter",
-                            style = MaterialTheme.typography.bodyMedium,
-                            fontWeight = FontWeight.SemiBold,
-                            color = Slate50
-                        )
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Text(
+                                text = "Strict Rapido Filter",
+                                style = MaterialTheme.typography.bodyMedium,
+                                fontWeight = FontWeight.SemiBold,
+                                color = Slate50
+                            )
+                            IconButton(onClick = { showRapidoInfo = true }, modifier = Modifier.size(28.dp).padding(start = 4.dp)) {
+                                Icon(Icons.Default.Info, contentDescription = "Info", tint = Cyan400, modifier = Modifier.size(16.dp))
+                            }
+                        }
                         Text(
                             text = if (isRapidoOnly) "Active on Rapido Captain (com.rapido.captain) only" else "Test Mode: Evaluates foreground app (safe: ignores self)",
                             fontSize = 11.sp,
@@ -4300,6 +4798,7 @@ fun SettingsTabContent(
         }
 
         // =========================================================================
+        SettingsSectionHeader("ADVANCED & UPDATES")
         // 6. ADVANCED INTERACTION SETTINGS CARD
         // =========================================================================
         Card(
@@ -4430,6 +4929,58 @@ fun SettingsTabContent(
                     }
                 }
             }
+
+        // =========================================================================
+        // REJECTED RIDES SUMMARY WIDGET
+        // =========================================================================
+        Spacer(modifier = Modifier.height(16.dp))
+        Card(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(bottom = 24.dp)
+                .testTag("rejected_rides_widget"),
+            shape = RoundedCornerShape(16.dp),
+            colors = CardDefaults.cardColors(containerColor = Slate900),
+            border = BorderStroke(1.dp, Slate800)
+        ) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(16.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Box(
+                    modifier = Modifier
+                        .size(48.dp)
+                        .clip(CircleShape)
+                        .background(Color(0x33EF4444)),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.Block,
+                        contentDescription = "Rejected Rides",
+                        tint = Rose400,
+                        modifier = Modifier.size(24.dp)
+                    )
+                }
+                Spacer(modifier = Modifier.width(16.dp))
+                Column {
+                    Text(
+                        text = "Rides Filtered Today",
+                        style = MaterialTheme.typography.titleSmall,
+                        color = Slate400,
+                        fontWeight = FontWeight.Medium
+                    )
+                    Text(
+                        text = ignoredCount.toString(),
+                        style = MaterialTheme.typography.headlineMedium,
+                        color = Rose400,
+                        fontWeight = FontWeight.Bold
+                    )
+                }
+            }
+        }
+
         }
     }
 }
