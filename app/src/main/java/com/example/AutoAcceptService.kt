@@ -149,6 +149,7 @@ data class RideLogItem(
 class AutoAcceptService : AccessibilityService(), TextToSpeech.OnInitListener {
 
     private var lastClickTimestamp: Long = 0
+    private var lastScanTimestamp: Long = 0
     private var textToSpeech: TextToSpeech? = null
     private var isTtsInitialized: Boolean = false
 
@@ -1731,6 +1732,10 @@ fun getCustomSoundUri(context: Context): String? {
             return
         }
 
+        // Throttle Spam Scans
+        if (now - lastScanTimestamp < 1000L) return
+        lastScanTimestamp = now
+
         // 4. FIND TRUE ROOT OF EVENT'S WINDOW:
         // Safely ascends to the root of the event's window while blocking background apps
         var windowRoot = try { event.source } catch (e: Exception) { null }
@@ -1788,6 +1793,14 @@ fun getCustomSoundUri(context: Context): String? {
             val cardContainer = findCardContainer(validButton.node, maxLevels = 5)
             
             val cardTexts = extractAllScreenTexts(this, cardContainer)
+
+            // STRICT CARD VALIDATION
+            val cardTextCombined = cardTexts.joinToString(" ").lowercase()
+            val hasFareIndicator = Regex("(₹|rs|inr)").containsMatchIn(cardTextCombined)
+            val hasDistanceIndicator = Regex("\\bkm\\b").containsMatchIn(cardTextCombined)
+            if (!hasFareIndicator || !hasDistanceIndicator) {
+                continue
+            }
 
             val parsedDistance = extractDistance(cardTexts)
             val parsedPrice = extractPrice(cardTexts)
@@ -2177,7 +2190,7 @@ fun getCustomSoundUri(context: Context): String? {
 
     private fun findAllAcceptButtons(rootNode: AccessibilityNodeInfo): List<ValidatedButton> {
         val buttons = mutableListOf<ValidatedButton>()
-        val exactKeywords = (getEnabledKeywords(this).toList() + listOf("Accept", "Swipe to Accept", "Take Order", "Confirm", "स्वीकार", "order le", "start ride")).distinct()
+        val exactKeywords = listOf("Accept", "Swipe to Accept", "Take Order", "Confirm", "order le", "start ride")
         for (keyword in exactKeywords) {
             val directNodes = try {
                 rootNode.findAccessibilityNodeInfosByText(keyword)
