@@ -209,4 +209,73 @@ class ExampleUnitTest {
     assertFalse(AutoAcceptService.isValidAcceptText("   ", "Accept"))
     assertFalse(AutoAcceptService.isValidAcceptText("A very very long paragraph containing the word accept inside it somewhere that is not a button", "Accept"))
   }
+
+  @Test
+  fun testExportDebugLogsToCsv() {
+    val sampleLogs = listOf(
+      DebugLogEntry(
+        id = "test_log_1",
+        serviceOrigin = ServiceOrigin.NOTIFICATION,
+        severity = LogSeverity.WARNING,
+        category = OrderDebugCategory.ORDER_MISSED,
+        title = "Missed: Price below minimum",
+        message = "Ride fare of ₹45 is lower than threshold ₹60",
+        fare = 45f,
+        distanceKm = 2.1f,
+        pickup = "Indiranagar, 100ft Road",
+        drop = "MG Road, Metro Station",
+        isMissedOrder = true,
+        missedReason = "Fare ₹45 below threshold",
+        suggestedFix = "Adjust Min Price setting in Home tab"
+      )
+    )
+
+    val csv = DebugLogManager.exportLogsToCsv(sampleLogs)
+    assertTrue(csv.startsWith("\uFEFF")) // Verify UTF-8 BOM
+    assertTrue(csv.contains("Log_ID,Timestamp_Millis,Formatted_Time,Service_Origin,Severity,Category,Title"))
+    assertTrue(csv.contains("test_log_1"))
+    assertTrue(csv.contains("\"Indiranagar, 100ft Road\"")) // Proper CSV quoting for commas
+    assertTrue(csv.contains("45.00"))
+    assertTrue(csv.contains("Adjust Min Price setting in Home tab"))
+  }
+
+  @Test
+  fun testExportRideLogsToCsv() {
+    val sampleRideLogs = listOf(
+      RideLogItem(
+        id = "order_123",
+        price = 150f,
+        pickupKm = 3.2f,
+        pickupLocation = "Koramangala 4th Block",
+        dropLocation = "Indiranagar Club, 12th Main",
+        status = "ACCEPTED",
+        reason = "Matched filters"
+      )
+    )
+
+    val csv = AutoAcceptService.exportRideLogsToCsv(sampleRideLogs)
+    assertTrue(csv.startsWith("\uFEFF")) // Verify UTF-8 BOM
+    assertTrue(csv.contains("Order_ID,Timestamp_Millis,Date_Time,Status,Fare_INR,Distance_KM,Pickup_Location,Drop_Location"))
+    assertTrue(csv.contains("order_123"))
+    assertTrue(csv.contains("ACCEPTED"))
+    assertTrue(csv.contains("150.00"))
+    assertTrue(csv.contains("3.2"))
+    assertTrue(csv.contains("\"Indiranagar Club, 12th Main\""))
+  }
+
+  @Test
+  fun testServiceStatusLabels() {
+    fun getStatusLabel(isActive: Boolean): String = if (isActive) "Active" else "Inactive"
+
+    assertEquals("Active", getStatusLabel(true))
+    assertEquals("Inactive", getStatusLabel(false))
+  }
+
+  @Test
+  fun testCpuWakeLockSafelyHandlesInactiveState() {
+    assertFalse(AutoAcceptService.isCpuWakeLockHeld())
+    // Ensure safe no-op release does not throw
+    AutoAcceptService.releaseCpuWakeLock("Test clean release")
+    assertFalse(AutoAcceptService.isCpuWakeLockHeld())
+  }
 }

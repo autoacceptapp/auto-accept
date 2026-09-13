@@ -14,5 +14,12 @@ class RideStrikeApp : Application() {
             Log.e("RideStrikeApp", "Failed to initialize FirebaseApp in Application: ${e.message}", e)
             e.printStackTrace()
         }
+
+        try {
+            ServiceStatusNotificationManager.createNotificationChannel(this)
+            ServiceStatusNotificationManager.updateStatus(this)
+        } catch (e: Exception) {
+            Log.e("RideStrikeApp", "Failed to initialize ServiceStatusNotificationManager: ${e.message}", e)
+        }
     }
 }

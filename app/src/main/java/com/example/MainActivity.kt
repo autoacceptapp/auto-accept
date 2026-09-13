@@ -54,6 +54,7 @@ import androidx.compose.material.icons.automirrored.filled.List
 import androidx.compose.material.icons.automirrored.filled.VolumeUp
 import androidx.compose.material.icons.filled.AccountCircle
 import androidx.compose.material.icons.filled.Block
+import androidx.compose.material.icons.filled.BugReport
 import androidx.compose.material.icons.filled.Cancel
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.CurrencyRupee
@@ -90,6 +91,7 @@ import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.FilterChipDefaults
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
@@ -100,6 +102,8 @@ import androidx.compose.material3.NavigationBarItemDefaults
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.Slider
+import androidx.compose.material3.SliderDefaults
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
 import androidx.compose.material3.SwitchDefaults
@@ -139,6 +143,7 @@ import androidx.credentials.CustomCredential
 import androidx.credentials.GetCredentialRequest
 import androidx.credentials.exceptions.GetCredentialCancellationException
 import androidx.credentials.exceptions.GetCredentialException
+import androidx.credentials.exceptions.NoCredentialException
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
@@ -249,6 +254,7 @@ class MainActivity : ComponentActivity(), TextToSpeech.OnInitListener {
         checkNotificationPermission()
 
         FirebaseHelper.initialize(this)
+        RemoteConfigManager.init(this)
 
         // Retrieve and log FCM registration token
         try {
@@ -290,6 +296,12 @@ class MainActivity : ComponentActivity(), TextToSpeech.OnInitListener {
                 )
             }
         }
+    }
+
+    override fun onResume() {
+        super.onResume()
+        ServiceStatusNotificationManager.updateStatus(this)
+        ServiceStatusWidgetProvider.updateAllWidgets(this)
     }
 
     /**
@@ -588,24 +600,34 @@ fun AutoAcceptDashboardScreen(
                 if (!isAutoSelect) {
                     Toast.makeText(context, "Sign-in cancelled", Toast.LENGTH_SHORT).show()
                 }
+            } catch (e: NoCredentialException) {
+                // Expected and normal when no credentials are saved on device or during silent auto-select
+                Log.d("MainActivity", "No credentials available for sign-in: ${e.message}")
+                if (!isAutoSelect) {
+                    Toast.makeText(context, "No Google account found on device. Please sign in or add an account in device Settings.", Toast.LENGTH_LONG).show()
+                }
             } catch (e: GetCredentialException) {
                 val rawMsg = e.localizedMessage ?: e.message ?: "Unknown credential error"
-                Log.e("MainActivity", "Credential Manager error: $rawMsg", e)
-                if (!isAutoSelect) {
+                if (isAutoSelect) {
+                    Log.d("MainActivity", "Auto-select credential check: $rawMsg")
+                } else {
+                    Log.w("MainActivity", "Credential Manager warning: $rawMsg")
                     val userFriendlyMsg = when {
                         rawMsg.contains("16") || rawMsg.contains("Cannot find a matching credential") ->
                             "No matching Google account found, or SHA-1 debug fingerprint is missing in Firebase Console."
                         rawMsg.contains("10") || rawMsg.contains("DEVELOPER_ERROR") ->
                             "Developer error (10): Ensure SHA-1 debug certificate fingerprint is registered in Firebase Console."
                         else ->
-                            "Google Sign-In failed: $rawMsg"
+                            "Google Sign-In note: $rawMsg"
                     }
                     Toast.makeText(context, userFriendlyMsg, Toast.LENGTH_LONG).show()
                 }
             } catch (e: Exception) {
                 val errorMsg = e.localizedMessage ?: e.message ?: "Authentication failed"
-                Log.e("MainActivity", "Authentication error: $errorMsg", e)
-                if (!isAutoSelect) {
+                if (isAutoSelect) {
+                    Log.d("MainActivity", "Silent sign-in check note: $errorMsg")
+                } else {
+                    Log.w("MainActivity", "Authentication warning: $errorMsg")
                     Toast.makeText(context, "Login failed: $errorMsg", Toast.LENGTH_LONG).show()
                 }
             } finally {
@@ -636,9 +658,12 @@ fun AutoAcceptDashboardScreen(
         }
     }
 
-    // Accessibility Service & System Optimization statuses
+    // Accessibility Service, Notification Listener & System Optimization statuses
     var isAccessibilityEnabled by remember {
         mutableStateOf(isAccessibilityServiceEnabled(context, AutoAcceptService::class.java))
+    }
+    var isNotificationListenerEnabled by remember {
+        mutableStateOf(isNotificationListenerEnabled(context))
     }
     var isBatteryOptimizationIgnored by remember {
         mutableStateOf(isBatteryOptimizationIgnored(context))
@@ -655,14 +680,17 @@ fun AutoAcceptDashboardScreen(
         val observer = LifecycleEventObserver { _, event ->
             if (event == Lifecycle.Event.ON_RESUME) {
                 val acc = isAccessibilityServiceEnabled(context, AutoAcceptService::class.java)
+                val notif = isNotificationListenerEnabled(context)
                 val bat = isBatteryOptimizationIgnored(context)
                 val ovl = canDrawOverlays(context)
                 isAccessibilityEnabled = acc
+                isNotificationListenerEnabled = notif
                 isBatteryOptimizationIgnored = bat
                 isOverlayAllowed = ovl
                 if (acc && bat && ovl) {
                     userDismissedPermissionsDialog = false
                 }
+                ServiceStatusNotificationManager.updateStatus(context)
             }
         }
         lifecycleOwner.lifecycle.addObserver(observer)
@@ -749,6 +777,7 @@ fun AutoAcceptDashboardScreen(
     var userNameInput by remember { mutableStateOf(AutoAcceptService.getUserName(context)) }
 
     var isRapidoOnly by remember { mutableStateOf(AutoAcceptService.isTargetRapidoOnly(context)) }
+    var acceptDelayMs by remember { mutableStateOf(AutoAcceptService.getAcceptDelayMs(context)) }
 
     // Live Logs & Event Stream
     val serviceLog by AutoAcceptService.recentLog.collectAsStateWithLifecycle()
@@ -756,8 +785,18 @@ fun AutoAcceptDashboardScreen(
 
     val isAcceptAllActive = isMasterSwitchOn && !isDistanceFilterOn && !isPriceFilterOn && !isBlacklistFilterOn
 
-    // Active bottom navigation tab: 0 = Home (Controls), 1 = Profile (Earnings), 2 = History (Order Logs)
-    var selectedTab by rememberSaveable { mutableStateOf(0) }
+    // Active bottom navigation tab: 0 = Home (Controls), 1 = Profile (Earnings), 2 = History (Order Logs), 3 = Debug Logs, 4 = Settings
+    val initialTargetTab = (context as? Activity)?.intent?.getIntExtra("TARGET_TAB", -1) ?: -1
+    var selectedTab by rememberSaveable {
+        mutableStateOf(if (initialTargetTab in 0..4) initialTargetTab else 0)
+    }
+
+    LaunchedEffect(Unit) {
+        val target = (context as? Activity)?.intent?.getIntExtra("TARGET_TAB", -1) ?: -1
+        if (target in 0..4) {
+            selectedTab = target
+        }
+    }
 
     // -------------------------------------------------------------------------
     // LOCAL RIDE LOGS (Collected from AutoAcceptService)
@@ -1021,6 +1060,31 @@ fun AutoAcceptDashboardScreen(
                     onClick = { selectedTab = 3 },
                     icon = {
                         Icon(
+                            imageVector = Icons.Default.BugReport,
+                            contentDescription = "Debug Logs"
+                        )
+                    },
+                    label = {
+                        Text(
+                            text = "Logs",
+                            fontSize = 11.sp,
+                            fontWeight = if (selectedTab == 3) FontWeight.Bold else FontWeight.Normal
+                        )
+                    },
+                    colors = NavigationBarItemDefaults.colors(
+                        selectedIconColor = Cyan400,
+                        selectedTextColor = Cyan400,
+                        indicatorColor = Slate800,
+                        unselectedIconColor = Slate400,
+                        unselectedTextColor = Slate400
+                    ),
+                    modifier = Modifier.testTag("nav_logs")
+                )
+                NavigationBarItem(
+                    selected = selectedTab == 4,
+                    onClick = { selectedTab = 4 },
+                    icon = {
+                        Icon(
                             imageVector = Icons.Default.Settings,
                             contentDescription = "Settings"
                         )
@@ -1029,7 +1093,7 @@ fun AutoAcceptDashboardScreen(
                         Text(
                             text = "Settings",
                             fontSize = 11.sp,
-                            fontWeight = if (selectedTab == 3) FontWeight.Bold else FontWeight.Normal
+                            fontWeight = if (selectedTab == 4) FontWeight.Bold else FontWeight.Normal
                         )
                     },
                     colors = NavigationBarItemDefaults.colors(
@@ -1869,6 +1933,13 @@ fun AutoAcceptDashboardScreen(
             }
 
             // =========================================================================
+            // SERVICE STATUS MONITOR DASHBOARD WIDGET
+            // =========================================================================
+            ServiceStatusDashboardWidget(
+                onNavigateToDebugLogs = { selectedTab = 3 }
+            )
+
+            // =========================================================================
             // 1. MASTER AUTO-ACCEPT SWITCH CARD
             // =========================================================================
             Card(
@@ -2513,6 +2584,14 @@ fun AutoAcceptDashboardScreen(
         )
     }
     3 -> {
+        DebugLogsScreen(
+            isAccessibilityEnabled = isAccessibilityEnabled,
+            isNotificationListenerEnabled = isNotificationListenerEnabled,
+            onOpenAccessibility = { openAccessibilitySettings(context) },
+            onOpenNotificationListener = { openNotificationListenerSettings(context) }
+        )
+    }
+    4 -> {
         SettingsTabContent(
             isPassActive = isPassActive,
             isWakeLockOn = isWakeLockOn,
@@ -2551,16 +2630,30 @@ fun AutoAcceptDashboardScreen(
                 isRapidoOnly = checked
                 AutoAcceptService.setTargetRapidoOnly(context, checked)
             },
+            isMasterSwitchOn = isMasterSwitchOn,
+            onMasterSwitchChange = { checked ->
+                isMasterSwitchOn = checked
+                AutoAcceptService.setAutomationEnabled(context, checked)
+            },
+            acceptDelayMs = acceptDelayMs,
+            onAcceptDelayChange = { delay ->
+                acceptDelayMs = delay
+                AutoAcceptService.setAcceptDelayMs(context, delay)
+            },
             isAccessibilityEnabled = isAccessibilityEnabled,
+            isNotificationListenerEnabled = isNotificationListenerEnabled,
             isBatteryOptimizationIgnored = isBatteryOptimizationIgnored,
             isOverlayAllowed = isOverlayAllowed,
             onOpenAccessibility = { openAccessibilitySettings(context) },
+            onOpenNotificationListener = { openNotificationListenerSettings(context) },
             onOpenBatteryOptimization = { openBatteryOptimizationSettings(context) },
             onOpenOverlay = { openOverlaySettings(context) },
             onRefreshPermissions = {
                 isAccessibilityEnabled = isAccessibilityServiceEnabled(context, AutoAcceptService::class.java)
+                isNotificationListenerEnabled = isNotificationListenerEnabled(context)
                 isBatteryOptimizationIgnored = isBatteryOptimizationIgnored(context)
                 isOverlayAllowed = canDrawOverlays(context)
+                ServiceStatusNotificationManager.updateStatus(context)
             },
             onUpdateAvailable = { updateInfo ->
                 updateInfoToPrompt = updateInfo
@@ -3277,10 +3370,16 @@ fun SettingsTabContent(
     onTestVoice: (String) -> Unit,
     isRapidoOnly: Boolean,
     onRapidoOnlyChange: (Boolean) -> Unit,
+    isMasterSwitchOn: Boolean,
+    onMasterSwitchChange: (Boolean) -> Unit,
+    acceptDelayMs: Long,
+    onAcceptDelayChange: (Long) -> Unit,
     isAccessibilityEnabled: Boolean,
+    isNotificationListenerEnabled: Boolean = false,
     isBatteryOptimizationIgnored: Boolean,
     isOverlayAllowed: Boolean,
     onOpenAccessibility: () -> Unit,
+    onOpenNotificationListener: () -> Unit = {},
     onOpenBatteryOptimization: () -> Unit,
     onOpenOverlay: () -> Unit,
     onRefreshPermissions: () -> Unit,
@@ -3405,6 +3504,66 @@ fun SettingsTabContent(
                             modifier = Modifier.testTag("accessibility_perm_button")
                         ) {
                             Text(if (isAccessibilityEnabled) "Settings" else "Enable", fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                        }
+                    }
+                }
+
+                // 2. Notification Listener Service
+                Surface(
+                    shape = RoundedCornerShape(14.dp),
+                    color = Slate950,
+                    border = BorderStroke(1.dp, Slate800),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(12.dp),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Column(modifier = Modifier.weight(1f)) {
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Text(
+                                    text = "Notification Access",
+                                    style = MaterialTheme.typography.bodyMedium,
+                                    fontWeight = FontWeight.SemiBold,
+                                    color = Slate100
+                                )
+                                Spacer(modifier = Modifier.width(8.dp))
+                                Surface(
+                                    shape = RoundedCornerShape(6.dp),
+                                    color = if (isNotificationListenerEnabled) EmeraldGlow else RoseGlow,
+                                    border = BorderStroke(1.dp, if (isNotificationListenerEnabled) Emerald500.copy(alpha = 0.5f) else Rose500.copy(alpha = 0.5f))
+                                ) {
+                                    Text(
+                                        text = if (isNotificationListenerEnabled) "ENABLED" else "DISABLED",
+                                        fontSize = 9.sp,
+                                        fontWeight = FontWeight.Bold,
+                                        color = if (isNotificationListenerEnabled) Emerald400 else Rose400,
+                                        modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+                                    )
+                                }
+                            }
+                            Spacer(modifier = Modifier.height(2.dp))
+                            Text(
+                                text = "Captures incoming ride order notifications in real-time",
+                                fontSize = 11.sp,
+                                color = Slate400
+                            )
+                        }
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Button(
+                            onClick = onOpenNotificationListener,
+                            shape = RoundedCornerShape(10.dp),
+                            colors = ButtonDefaults.buttonColors(
+                                containerColor = if (isNotificationListenerEnabled) Slate800 else Emerald500,
+                                contentColor = if (isNotificationListenerEnabled) Slate300 else Color.White
+                            ),
+                            contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp),
+                            modifier = Modifier.testTag("notification_listener_perm_button")
+                        ) {
+                            Text(if (isNotificationListenerEnabled) "Settings" else "Enable", fontSize = 12.sp, fontWeight = FontWeight.Bold)
                         }
                     }
                 }
@@ -3551,7 +3710,213 @@ fun SettingsTabContent(
         }
 
         // =========================================================================
-        // 2. SCREEN WAKE & UNLOCK CARD (PREMIUM FEATURE)
+        // 2. AUTO ACCEPT SERVICE & DELAY CONFIGURATION
+        // =========================================================================
+        Card(
+            modifier = Modifier
+                .fillMaxWidth()
+                .testTag("auto_accept_settings_card"),
+            shape = RoundedCornerShape(22.dp),
+            colors = CardDefaults.cardColors(containerColor = Slate900),
+            border = BorderStroke(
+                1.dp,
+                if (isMasterSwitchOn) Emerald500.copy(alpha = 0.5f) else Slate800
+            ),
+            elevation = CardDefaults.cardElevation(defaultElevation = 2.dp)
+        ) {
+            Column(
+                modifier = Modifier.padding(18.dp),
+                verticalArrangement = Arrangement.spacedBy(16.dp)
+            ) {
+                // Header & Auto Accept Toggle
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier.weight(1f)
+                    ) {
+                        Box(
+                            modifier = Modifier
+                                .size(42.dp)
+                                .clip(CircleShape)
+                                .background(if (isMasterSwitchOn) EmeraldGlow else Color(0x33EF4444)),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.PowerSettingsNew,
+                                contentDescription = "Auto Accept Toggle",
+                                tint = if (isMasterSwitchOn) Emerald400 else Rose400,
+                                modifier = Modifier.size(22.dp)
+                            )
+                        }
+
+                        Spacer(modifier = Modifier.width(12.dp))
+
+                        Column {
+                            Text(
+                                text = "Auto Accept Service",
+                                style = MaterialTheme.typography.titleMedium,
+                                fontWeight = FontWeight.Bold,
+                                color = Slate50
+                            )
+                            Text(
+                                text = if (isMasterSwitchOn) "Service Active & Scanning" else "Service Paused (Disabled)",
+                                fontSize = 12.sp,
+                                fontWeight = FontWeight.Medium,
+                                color = if (isMasterSwitchOn) Emerald400 else Slate400
+                            )
+                        }
+                    }
+
+                    Switch(
+                        checked = isMasterSwitchOn,
+                        onCheckedChange = onMasterSwitchChange,
+                        colors = SwitchDefaults.colors(
+                            checkedThumbColor = Color.White,
+                            checkedTrackColor = Emerald500,
+                            uncheckedThumbColor = Slate400,
+                            uncheckedTrackColor = Slate800
+                        ),
+                        modifier = Modifier.testTag("auto_accept_settings_switch")
+                    )
+                }
+
+                HorizontalDivider(color = Slate800, thickness = 1.dp)
+
+                // Accept Wait Delay Section
+                Column(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Icon(
+                                imageVector = Icons.Default.Schedule,
+                                contentDescription = null,
+                                tint = Cyan400,
+                                modifier = Modifier.size(18.dp)
+                            )
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Text(
+                                text = "Wait Delay Before Accept",
+                                style = MaterialTheme.typography.bodyMedium,
+                                fontWeight = FontWeight.SemiBold,
+                                color = Slate200
+                            )
+                        }
+
+                        Surface(
+                            shape = RoundedCornerShape(8.dp),
+                            color = Cyan500.copy(alpha = 0.15f),
+                            border = BorderStroke(1.dp, Cyan400.copy(alpha = 0.4f))
+                        ) {
+                            Text(
+                                text = if (acceptDelayMs == 0L) "Instant (0ms)" else "${acceptDelayMs} ms",
+                                fontSize = 12.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = Cyan300,
+                                modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)
+                            )
+                        }
+                    }
+
+                    Text(
+                        text = "Adjust the pause duration between order arrival and automated click dispatch (0ms to 3000ms).",
+                        fontSize = 11.sp,
+                        color = Slate400,
+                        lineHeight = 16.sp
+                    )
+
+                    Slider(
+                        value = acceptDelayMs.toFloat(),
+                        onValueChange = { value ->
+                            val rounded = (Math.round(value / 50.0) * 50).toLong()
+                            onAcceptDelayChange(rounded)
+                        },
+                        valueRange = 0f..3000f,
+                        steps = 59, // step of 50ms (3000 / 50 - 1)
+                        colors = SliderDefaults.colors(
+                            thumbColor = Cyan400,
+                            activeTrackColor = Cyan400,
+                            inactiveTrackColor = Slate800
+                        ),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .testTag("accept_delay_slider")
+                    )
+
+                    // Quick delay presets
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        listOf(0L to "Instant", 200L to "200ms", 500L to "500ms", 1000L to "1.0s", 2000L to "2.0s").forEach { (presetMs, label) ->
+                            val isSelected = acceptDelayMs == presetMs
+                            Surface(
+                                shape = RoundedCornerShape(10.dp),
+                                color = if (isSelected) Cyan500.copy(alpha = 0.2f) else Slate800.copy(alpha = 0.6f),
+                                border = BorderStroke(
+                                    1.dp,
+                                    if (isSelected) Cyan400 else Slate700
+                                ),
+                                onClick = { onAcceptDelayChange(presetMs) },
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .testTag("preset_delay_${presetMs}ms")
+                            ) {
+                                Text(
+                                    text = label,
+                                    fontSize = 11.sp,
+                                    fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Normal,
+                                    color = if (isSelected) Cyan300 else Slate400,
+                                    textAlign = androidx.compose.ui.text.style.TextAlign.Center,
+                                    modifier = Modifier.padding(vertical = 6.dp)
+                                )
+                            }
+                        }
+                    }
+
+                    // Firebase Remote Config Status Indicator
+                    val remoteConfigStatus = RemoteConfigManager.lastFetchStatus.collectAsStateWithLifecycle().value
+                    val dynamicPackages = RemoteConfigManager.allowedPackages.collectAsStateWithLifecycle().value
+                    Surface(
+                        shape = RoundedCornerShape(10.dp),
+                        color = Slate950.copy(alpha = 0.6f),
+                        border = BorderStroke(1.dp, Slate800),
+                        modifier = Modifier.fillMaxWidth().testTag("remote_config_status_banner")
+                    ) {
+                        Row(
+                            modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Box(
+                                modifier = Modifier
+                                    .size(8.dp)
+                                    .clip(CircleShape)
+                                    .background(Emerald400)
+                            )
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Text(
+                                text = "Cloud Config: ${dynamicPackages.size} packages monitored (${remoteConfigStatus})",
+                                fontSize = 10.sp,
+                                color = Slate400,
+                                maxLines = 1
+                            )
+                        }
+                    }
+                }
+            }
+        }
+
+        // =========================================================================
+        // 3. SCREEN WAKE & UNLOCK CARD (PREMIUM FEATURE)
         // =========================================================================
         Card(
             modifier = Modifier

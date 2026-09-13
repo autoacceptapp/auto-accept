@@ -1469,33 +1469,64 @@ fun OrderHistoryTabContent(
                 }
 
                 val context = LocalContext.current
-                Button(
-                    onClick = {
-                        val samplePrices = listOf(65f, 95f, 130f, 180f, 220f)
-                        val sampleDists = listOf(1.2f, 2.5f, 3.8f, 4.5f, 6.0f)
-                        val samplePickups = listOf("Indiranagar 100ft Rd", "MG Road Metro", "Koramangala 4th Block", "HSR Layout Sec 2", "Whitefield Main Rd")
-                        val sampleDrops = listOf("Koramangala 5th Block", "Indiranagar Club", "Electronic City Phase 1", "Bellandur EcoSpace", "Outer Ring Road")
-                        val randIdx = (samplePrices.indices).random()
-
-                        AutoAcceptService.logRideLocally(
-                            context = context,
-                            price = samplePrices[randIdx],
-                            pickupKm = sampleDists[randIdx],
-                            pickupLocation = samplePickups[randIdx],
-                            dropLocation = sampleDrops[randIdx],
-                            status = "ACCEPTED",
-                            reason = "Simulated Order",
-                            sourcePackage = AutoAcceptService.RAPIDO_CAPTAIN_PACKAGE
-                        )
-                    },
-                    shape = RoundedCornerShape(10.dp),
-                    colors = ButtonDefaults.buttonColors(containerColor = Slate800, contentColor = Emerald400),
-                    contentPadding = PaddingValues(horizontal = 10.dp, vertical = 6.dp),
-                    modifier = Modifier.testTag("simulate_order_button")
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
-                    Icon(imageVector = Icons.Default.Add, contentDescription = null, modifier = Modifier.size(14.dp))
-                    Spacer(modifier = Modifier.width(4.dp))
-                    Text("Simulate Accepted Order", fontSize = 11.sp, fontWeight = FontWeight.SemiBold)
+                    // Export CSV Button
+                    Button(
+                        onClick = {
+                            if (displayedLogs.isEmpty()) {
+                                Toast.makeText(context, "No orders to export", Toast.LENGTH_SHORT).show()
+                                return@Button
+                            }
+                            val res = AutoAcceptService.shareRideLogsAsCsv(context, displayedLogs)
+                            if (res.isSuccess) {
+                                Toast.makeText(context, "Exporting ${displayedLogs.size} orders to CSV...", Toast.LENGTH_SHORT).show()
+                            } else {
+                                Toast.makeText(context, "Export error: ${res.exceptionOrNull()?.localizedMessage}", Toast.LENGTH_LONG).show()
+                            }
+                        },
+                        shape = RoundedCornerShape(10.dp),
+                        colors = ButtonDefaults.buttonColors(containerColor = Cyan500.copy(alpha = 0.18f), contentColor = Cyan400),
+                        border = BorderStroke(1.dp, Cyan400.copy(alpha = 0.4f)),
+                        contentPadding = PaddingValues(horizontal = 10.dp, vertical = 6.dp),
+                        modifier = Modifier.testTag("export_orders_csv_button")
+                    ) {
+                        Icon(imageVector = Icons.Default.Share, contentDescription = null, modifier = Modifier.size(13.dp))
+                        Spacer(modifier = Modifier.width(4.dp))
+                        Text("Export CSV", fontSize = 11.sp, fontWeight = FontWeight.SemiBold)
+                    }
+
+                    // Simulate Order Button
+                    Button(
+                        onClick = {
+                            val samplePrices = listOf(65f, 95f, 130f, 180f, 220f)
+                            val sampleDists = listOf(1.2f, 2.5f, 3.8f, 4.5f, 6.0f)
+                            val samplePickups = listOf("Indiranagar 100ft Rd", "MG Road Metro", "Koramangala 4th Block", "HSR Layout Sec 2", "Whitefield Main Rd")
+                            val sampleDrops = listOf("Koramangala 5th Block", "Indiranagar Club", "Electronic City Phase 1", "Bellandur EcoSpace", "Outer Ring Road")
+                            val randIdx = (samplePrices.indices).random()
+
+                            AutoAcceptService.logRideLocally(
+                                context = context,
+                                price = samplePrices[randIdx],
+                                pickupKm = sampleDists[randIdx],
+                                pickupLocation = samplePickups[randIdx],
+                                dropLocation = sampleDrops[randIdx],
+                                status = "ACCEPTED",
+                                reason = "Simulated Order",
+                                sourcePackage = AutoAcceptService.RAPIDO_CAPTAIN_PACKAGE
+                            )
+                        },
+                        shape = RoundedCornerShape(10.dp),
+                        colors = ButtonDefaults.buttonColors(containerColor = Slate800, contentColor = Emerald400),
+                        contentPadding = PaddingValues(horizontal = 10.dp, vertical = 6.dp),
+                        modifier = Modifier.testTag("simulate_order_button")
+                    ) {
+                        Icon(imageVector = Icons.Default.Add, contentDescription = null, modifier = Modifier.size(14.dp))
+                        Spacer(modifier = Modifier.width(4.dp))
+                        Text("Simulate", fontSize = 11.sp, fontWeight = FontWeight.SemiBold)
+                    }
                 }
             }
         }

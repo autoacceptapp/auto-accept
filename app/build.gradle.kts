@@ -107,6 +107,7 @@ dependencies {
   implementation(libs.firebase.ai)
   // Firestore:
   implementation(libs.firebase.firestore)
+  implementation(libs.firebase.config)
 
   // Firebase Auth and Google Sign-In (Credential Manager):
   implementation(libs.firebase.auth)

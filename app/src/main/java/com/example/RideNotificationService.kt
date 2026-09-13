@@ -3,83 +3,123 @@ package com.example
 import android.service.notification.NotificationListenerService
 import android.service.notification.StatusBarNotification
 import android.util.Log
-import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.Job
-import kotlinx.coroutines.SupervisorJob
-import kotlinx.coroutines.cancel
-import kotlinx.coroutines.delay
-import kotlinx.coroutines.launch
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
 
-/**
- * Listens for OS-level status bar notifications from Rapido Captain / allowed driver apps.
- * Acts as the authoritative primary trigger that arms the AutoAccept accessibility engine,
- * eliminating false positive triggers on unrelated background apps such as YouTube or Chrome.
- */
 class RideNotificationService : NotificationListenerService() {
+    companion object {
+        private const val TAG = "RideNotificationService"
 
-    private val serviceScope = CoroutineScope(Dispatchers.Main + SupervisorJob())
-    private var resetJob: Job? = null
+        private val _isListenerConnected = MutableStateFlow(false)
+        val isListenerConnected: StateFlow<Boolean> = _isListenerConnected.asStateFlow()
 
-    override fun onNotificationPosted(sbn: StatusBarNotification?) {
-        if (sbn == null) return
-        val packageName = sbn.packageName ?: return
+        fun isConnected(): Boolean = _isListenerConnected.value
+    }
 
-        // Verify package belongs to Rapido Captain or allowed driver packages
-        if (!AutoAcceptService.ALLOWED_RAPIDO_PACKAGES.contains(packageName)) {
-            return
-        }
+    override fun onListenerConnected() {
+        super.onListenerConnected()
+        _isListenerConnected.value = true
+        Log.i(TAG, "RideNotificationService listener connected.")
+        DebugLogManager.logNotification(
+            title = "Notification Listener Connected",
+            message = "RideNotificationService is actively listening for driver order alerts",
+            severity = LogSeverity.INFO,
+            category = OrderDebugCategory.SERVICE_STATUS,
+            rawDetails = "Allowed packages: ${AutoAcceptService.ALLOWED_RAPIDO_PACKAGES.joinToString()}"
+        )
+        ServiceStatusNotificationManager.updateStatus(this)
+        ServiceStatusWidgetProvider.updateAllWidgets(this)
+    }
 
-        val notification = sbn.notification ?: return
-        val extras = notification.extras ?: return
-
-        val title = extras.getCharSequence("android.title")?.toString() ?: ""
-        val text = extras.getCharSequence("android.text")?.toString() ?: ""
-        val bigText = extras.getCharSequence("android.bigText")?.toString() ?: ""
-        val subText = extras.getCharSequence("android.subText")?.toString() ?: ""
-        val fullContent = "$title $text $bigText $subText".trim()
-
-        if (isIncomingRideNotification(fullContent)) {
-            Log.i(TAG, "Incoming ride notification detected from $packageName: $title | $text")
-            AutoAcceptService.isGenuineOrderIncoming = true
-
-            AutoAcceptService.logServiceEvent(
-                type = ServiceEventType.ORDER_DETECTED,
-                title = "Order notification received",
-                description = "Incoming ride alert from Rapido: ${title.ifBlank { text }}",
-                details = "Trigger armed for 30s. Accessibility screen parser active.",
-                badge = "INCOMING"
-            )
-
-            // Auto-reset this flag back to false after 30 seconds
-            resetJob?.cancel()
-            resetJob = serviceScope.launch {
-                delay(30_000L)
-                AutoAcceptService.isGenuineOrderIncoming = false
-                Log.d(TAG, "Reset isGenuineOrderIncoming to false after 30s timeout")
-            }
-        }
+    override fun onListenerDisconnected() {
+        super.onListenerDisconnected()
+        _isListenerConnected.value = false
+        Log.w(TAG, "RideNotificationService listener disconnected.")
+        DebugLogManager.logNotification(
+            title = "Notification Listener Disconnected",
+            message = "RideNotificationService was unbound or disconnected by Android system",
+            severity = LogSeverity.WARNING,
+            category = OrderDebugCategory.SERVICE_STATUS,
+            missedReason = "Notification Listener permission may be revoked or service killed by OS battery optimization.",
+            suggestedFix = "Re-enable Notification Access in device Settings and exclude app from Battery Saver."
+        )
+        ServiceStatusNotificationManager.updateStatus(this)
+        ServiceStatusWidgetProvider.updateAllWidgets(this)
     }
 
     override fun onDestroy() {
         super.onDestroy()
-        resetJob?.cancel()
-        serviceScope.cancel()
+        _isListenerConnected.value = false
+        ServiceStatusNotificationManager.updateStatus(this)
+        ServiceStatusWidgetProvider.updateAllWidgets(this)
     }
 
-    companion object {
-        private const val TAG = "RideNotificationService"
+    override fun onNotificationPosted(sbn: StatusBarNotification?) {
+        super.onNotificationPosted(sbn)
+        val packageName = sbn?.packageName ?: return
 
-        private val INCOMING_KEYWORDS = listOf(
-            "order", "ride", "booking", "request", "pickup", "pick up",
-            "drop", "fare", "₹", "rs", "captain", "accept", "incoming",
-            "new", "assigned", "trip", "demand", "chalo", "shuru"
-        )
+        val notification = sbn.notification ?: return
+        val extras = notification.extras ?: return
+        val rawTitle = (extras.getCharSequence(android.app.Notification.EXTRA_TITLE)
+            ?: extras.getString(android.app.Notification.EXTRA_TITLE))?.toString() ?: ""
+        val rawText = (extras.getCharSequence(android.app.Notification.EXTRA_TEXT)
+            ?: extras.getString(android.app.Notification.EXTRA_TEXT))?.toString() ?: ""
+        val title = rawTitle.lowercase()
+        val text = rawText.lowercase()
 
-        fun isIncomingRideNotification(content: String): Boolean {
-            if (content.isBlank()) return true
-            val lower = content.lowercase()
-            return INCOMING_KEYWORDS.any { lower.contains(it) }
+        // Check if the notification is from allowed Rapido/Driver apps
+        if (AutoAcceptService.ALLOWED_RAPIDO_PACKAGES.contains(packageName)) {
+            val combinedText = "$title$text"
+
+            // Checking common incoming order keywords
+            if (combinedText.contains("new") ||
+                combinedText.contains("incoming") ||
+                combinedText.contains("accept") ||
+                combinedText.contains("request") ||
+                combinedText.contains("ride") ||
+                combinedText.contains("order") ||
+                combinedText.contains("booking")
+            ) {
+                Log.i(TAG, "Genuine Ride Notification detected from $packageName")
+                DebugLogManager.logNotification(
+                    title = "Genuine Ride Notification Detected",
+                    message = "Incoming order alert received from $packageName: '$rawTitle'",
+                    severity = LogSeverity.SUCCESS,
+                    category = OrderDebugCategory.ORDER_DETECTED,
+                    packageName = packageName,
+                    rawDetails = "Title: '$rawTitle' | Text: '$rawText' -> Armed AutoAccept scanner"
+                )
+                AutoAcceptService.triggerFromNotification(this)
+            } else {
+                Log.d(TAG, "Notification from $packageName ignored: no ride keywords ($combinedText)")
+                DebugLogManager.logNotification(
+                    title = "Notification Ignored (No Ride Keywords)",
+                    message = "Notification from $packageName did not match active ride booking keywords",
+                    severity = LogSeverity.WARNING,
+                    category = OrderDebugCategory.NOTIFICATION_IGNORED,
+                    packageName = packageName,
+                    missedReason = "Notification text did not contain active booking triggers ('new', 'incoming', 'accept', 'ride', 'order').",
+                    suggestedFix = "This is normal for promotional or system alerts from Rapido. Real bookings will trigger automatically.",
+                    rawDetails = "Title: '$rawTitle' | Text: '$rawText'"
+                )
+            }
+        } else if (packageName.contains("rapido", ignoreCase = true) ||
+            packageName.contains("driver", ignoreCase = true) ||
+            packageName.contains("captain", ignoreCase = true)
+        ) {
+            // Unmonitored package that sounds like driver app
+            Log.d(TAG, "Notification from unmonitored package: $packageName")
+            DebugLogManager.logNotification(
+                title = "Driver Notification Filtered (Unmonitored App)",
+                message = "Received alert from '$packageName' which is not in monitored packages",
+                severity = LogSeverity.INFO,
+                category = OrderDebugCategory.NOTIFICATION_IGNORED,
+                packageName = packageName,
+                missedReason = "App package '$packageName' is not listed in active allowed packages.",
+                suggestedFix = "Update allowed packages via Firebase Remote Config or contact administrator if using a new app package.",
+                rawDetails = "Title: '$rawTitle' | Text: '$rawText'"
+            )
         }
     }
 }

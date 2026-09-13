@@ -31,6 +31,8 @@ class BootReceiver : BroadcastReceiver() {
             val isAutomationOn = AutoAcceptService.isAutomationEnabled(context)
             Log.d(TAG, "Device boot completed. Master Auto-Accept status: $isAutomationOn")
 
+            ServiceStatusNotificationManager.updateStatus(context)
+
             if (isAutomationOn) {
                 showBootActiveNotification(context)
             }

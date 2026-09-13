@@ -8,6 +8,7 @@ import android.os.PowerManager
 import android.provider.Settings
 import android.text.TextUtils
 import android.widget.Toast
+import androidx.core.app.NotificationManagerCompat
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
@@ -96,6 +97,31 @@ fun openAccessibilitySettings(context: Context) {
         flags = Intent.FLAG_ACTIVITY_NEW_TASK
     }
     context.startActivity(intent)
+}
+
+fun isNotificationListenerEnabled(context: Context): Boolean {
+    val flat = Settings.Secure.getString(context.contentResolver, "enabled_notification_listeners")
+    if (!flat.isNullOrEmpty()) {
+        val names = flat.split(":")
+        for (name in names) {
+            val cn = ComponentName.unflattenFromString(name)
+            if (cn != null && cn.packageName == context.packageName) {
+                return true
+            }
+        }
+    }
+    return NotificationManagerCompat.getEnabledListenerPackages(context).contains(context.packageName)
+}
+
+fun openNotificationListenerSettings(context: Context) {
+    try {
+        val intent = Intent(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS).apply {
+            flags = Intent.FLAG_ACTIVITY_NEW_TASK
+        }
+        context.startActivity(intent)
+    } catch (e: Exception) {
+        Toast.makeText(context, "Could not open notification listener settings", Toast.LENGTH_SHORT).show()
+    }
 }
 
 fun isBatteryOptimizationIgnored(context: Context): Boolean {
