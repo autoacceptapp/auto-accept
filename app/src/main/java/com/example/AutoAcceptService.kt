@@ -1940,15 +1940,7 @@ class AutoAcceptService : AccessibilityService(), TextToSpeech.OnInitListener {
                     return@launch
                 }
 
-                // 3. SOURCE PACKAGE CHECK: Verify package is still Rapido
-                val freshPackage = freshRoot.packageName?.toString() ?: ""
-                if (isTargetRapidoOnly(this@AutoAcceptService) && !getEnabledApps(this@AutoAcceptService).contains(freshPackage)) {
-                    Log.w(TAG, "Pending accept cancelled: package is no longer Rapido ($freshPackage)")
-                    _recentLog.value = "Pending accept cancelled: package changed"
-                    return@launch
-                }
-
-                // 4. LOCATE ACCEPT BUTTON VIA findAcceptButton(freshRoot)
+                // 3. LOCATE ACCEPT BUTTON VIA findAcceptButton(freshRoot)
                 val validButton = findAcceptButton(freshRoot)
                 if (validButton == null) {
                     Log.w(TAG, "Pending accept cancelled: accept button not found")
@@ -1976,18 +1968,7 @@ class AutoAcceptService : AccessibilityService(), TextToSpeech.OnInitListener {
                     return@launch
                 }
 
-                // 5. MASTER SWITCH CHECK PRIOR TO CLICK
-                if (!isAutomationEnabled(this@AutoAcceptService)) {
-                    return@launch
-                }
-
-                val recentAcceptedCheck = recentlyAcceptedRides[capturedRide.signature]
-                if (recentAcceptedCheck != null && System.currentTimeMillis() - recentAcceptedCheck < DUPLICATE_COOLDOWN_MS) {
-                    Log.w(TAG, "Pending accept cancelled: duplicate cooldown active")
-                    return@launch
-                }
-
-                // 6. IMMEDIATELY EXECUTE ACCEPT CLICK
+                // 4. IMMEDIATELY EXECUTE ACCEPT CLICK
                 when (val outcome = executeAcceptClick(validButton)) {
                     is ClickResult.Success -> {
                         lastClickTimestamp = SystemClock.uptimeMillis()
@@ -2185,7 +2166,7 @@ class AutoAcceptService : AccessibilityService(), TextToSpeech.OnInitListener {
         } catch (e: Exception) {
             return false
         }
-        if (bounds.isEmpty || bounds.width() <= 10 || bounds.height() <= 10) {
+        if (bounds.isEmpty || bounds.width() < 1 || bounds.height() < 1) {
             return false
         }
         return true
@@ -2197,7 +2178,7 @@ class AutoAcceptService : AccessibilityService(), TextToSpeech.OnInitListener {
      */
     private fun findAcceptButton(rootNode: AccessibilityNodeInfo): ValidatedButton? {
         // 1. MacroDroid Style Fast-Path: Direct OS-level text matching
-        val exactKeywords = getEnabledKeywords(this).toList()
+        val exactKeywords = (getEnabledKeywords(this).toList() + listOf("Accept", "Swipe to Accept", "Take Order", "Confirm", "स्वीकार", "order le", "start ride")).distinct()
         for (keyword in exactKeywords) {
             val directNodes = try {
                 rootNode.findAccessibilityNodeInfosByText(keyword)
