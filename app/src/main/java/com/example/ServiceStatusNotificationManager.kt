@@ -274,8 +274,7 @@ object ServiceStatusNotificationManager {
             if (!hasMissing && masterOn) {
                 NotificationManagerCompat.from(context).cancel(NOTIFICATION_ID)
                 notificationManager?.cancel(NOTIFICATION_ID)
-                // Stop KeepAliveService so it doesn't hold notification 1001
-                KeepAliveService.stop(context)
+                
                 Log.d(TAG, "All critical permissions active. Service status notification cancelled/dismissed.")
                 return
             }

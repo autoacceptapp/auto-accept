@@ -34,7 +34,7 @@ class BootReceiver : BroadcastReceiver() {
             ServiceStatusNotificationManager.updateStatus(context)
 
             if (isAutomationOn) {
-                KeepAliveService.start(context)
+                
                 showBootActiveNotification(context)
             }
         }

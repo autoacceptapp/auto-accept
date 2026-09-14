@@ -22,7 +22,7 @@ class RideStrikeApp : Application() {
             AutoAcceptService.initCache(this)
             
             if (AutoAcceptService.isAutomationEnabled(this)) {
-                KeepAliveService.start(this)
+                
             }
         } catch (e: Exception) {
             Log.e("RideStrikeApp", "Failed to initialize ServiceStatusNotificationManager: ${e.message}", e)

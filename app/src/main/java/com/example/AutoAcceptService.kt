@@ -932,10 +932,10 @@ class AutoAcceptService : AccessibilityService(), TextToSpeech.OnInitListener {
             prefs.edit().putBoolean(KEY_AUTO_ACCEPT_ENABLED, enabled).apply()
             if (!enabled) {
                 instance?.cancelPendingAcceptInternal("Master switch turned OFF")
-                KeepAliveService.stop(context)
+                
                 StatusOverlayManager.hide()
             } else {
-                KeepAliveService.start(context)
+                
                 StatusOverlayManager.show(context)
             }
             _recentLog.value = if (enabled) {
@@ -1973,7 +1973,7 @@ fun getCustomSoundUri(context: Context): String? {
         }
 
         if (isAutomationEnabled(this)) {
-            KeepAliveService.start(this)
+            
         }
         ServiceStatusNotificationManager.updateStatus(this)
     }
