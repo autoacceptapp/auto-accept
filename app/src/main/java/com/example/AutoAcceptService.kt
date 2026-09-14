@@ -402,7 +402,9 @@ class AutoAcceptService : AccessibilityService(), TextToSpeech.OnInitListener {
          * and manages fallback reset.
          */
         fun triggerFromNotification(context: Context? = null) {
-            genuineOrderIncomingTimestamp = System.currentTimeMillis()
+            val now = System.currentTimeMillis()
+            if (now - genuineOrderIncomingTimestamp < 3000L) return
+            genuineOrderIncomingTimestamp = now
             isGenuineOrderIncoming = true
             acquireCpuWakeLock(context, timeoutMs = 15000L, reason = "Incoming ride notification detected")
             startSafetyMonitor()
@@ -598,13 +600,24 @@ class AutoAcceptService : AccessibilityService(), TextToSpeech.OnInitListener {
         private val recentlyAcceptedRides = ConcurrentHashMap<String, Long>()
         private const val DUPLICATE_COOLDOWN_MS = 25000L
 
+        private val recentlyRejectedRides = ConcurrentHashMap<String, Long>()
+        private const val REJECT_COOLDOWN_MS = 15000L
+
         private fun cleanStaleAcceptedRides() {
-            val cutoff = System.currentTimeMillis() - DUPLICATE_COOLDOWN_MS
-            val it = recentlyAcceptedRides.entries.iterator()
-            while (it.hasNext()) {
-                val entry = it.next()
-                if (entry.value < cutoff) {
-                    it.remove()
+            val now = System.currentTimeMillis()
+            val acceptCutoff = now - DUPLICATE_COOLDOWN_MS
+            val acceptIt = recentlyAcceptedRides.entries.iterator()
+            while (acceptIt.hasNext()) {
+                if (acceptIt.next().value < acceptCutoff) {
+                    acceptIt.remove()
+                }
+            }
+            
+            val rejectCutoff = now - REJECT_COOLDOWN_MS
+            val rejectIt = recentlyRejectedRides.entries.iterator()
+            while (rejectIt.hasNext()) {
+                if (rejectIt.next().value < rejectCutoff) {
+                    rejectIt.remove()
                 }
             }
         }
@@ -1732,7 +1745,6 @@ fun getCustomSoundUri(context: Context): String? {
             return
         }
 
-        // Throttle Spam Scans
         if (now - lastScanTimestamp < 1000L) return
         lastScanTimestamp = now
 
@@ -1811,6 +1823,9 @@ fun getCustomSoundUri(context: Context): String? {
             val distInfo = parsedDistance?.let { "${it} km" } ?: "Dist ~"
 
             val rideSignature = generateRideSignature(sourcePackage, parsedPrice, parsedDistance, parsedPickup, parsedDrop)
+
+            val lastRejected = recentlyRejectedRides[rideSignature]
+            if (lastRejected != null && System.currentTimeMillis() - lastRejected < REJECT_COOLDOWN_MS) continue
 
             val lastAccepted = recentlyAcceptedRides[rideSignature]
             if (lastAccepted != null && System.currentTimeMillis() - lastAccepted < DUPLICATE_COOLDOWN_MS) {
@@ -1926,6 +1941,7 @@ fun getCustomSoundUri(context: Context): String? {
                     }
 
                     if (filterFailed) {
+                        recentlyRejectedRides[rideSignature] = System.currentTimeMillis()
                         continue
                     }
                     acceptReason = "Auto-Accepted (Filters Passed - ${delayMs}ms)"

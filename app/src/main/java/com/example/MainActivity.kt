@@ -127,6 +127,10 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.core.tween
+import androidx.compose.ui.draw.scale
+import androidx.compose.material3.FloatingActionButton
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
@@ -861,13 +865,6 @@ var dailyGoal by remember { mutableStateOf(AutoAcceptService.getDailyGoal(contex
         acceptedLogs.sumOf { it.pickupKm.toDouble() }.toFloat()
     }
 
-    var showSplash by rememberSaveable { mutableStateOf(true) }
-
-    if (showSplash) {
-        SplashScreen(onTimeout = { showSplash = false })
-        return
-    }
-
 if (showGoalEditDialog) {
         AlertDialog(
             onDismissRequest = { showGoalEditDialog = false },
@@ -1194,6 +1191,24 @@ if (showGoalEditDialog) {
                         unselectedTextColor = Slate400
                     ),
                     modifier = Modifier.testTag("nav_settings")
+                )
+            }
+        },
+        floatingActionButton = {
+            FloatingActionButton(
+                onClick = {
+                    isMasterSwitchOn = !isMasterSwitchOn
+                    AutoAcceptService.setAutomationEnabled(context, isMasterSwitchOn)
+                },
+                containerColor = if (isMasterSwitchOn && isAccessibilityEnabled) Emerald500 else Slate700,
+                contentColor = Slate950,
+                modifier = Modifier
+                    .padding(bottom = 16.dp)
+                    .testTag("dashboard_fab_toggle")
+            ) {
+                Icon(
+                    imageVector = if (isMasterSwitchOn && isAccessibilityEnabled) Icons.Default.Close else Icons.Default.PlayArrow,
+                    contentDescription = "Toggle Service"
                 )
             }
         }
@@ -2665,83 +2680,7 @@ if (showGoalEditDialog) {
 
 
 
-@Composable
-fun SplashScreen(onTimeout: () -> Unit) {
-    LaunchedEffect(Unit) {
-        delay(2000L)
-        onTimeout()
-    }
 
-    Box(
-        modifier = Modifier
-            .fillMaxSize()
-            .background(Slate950)
-            .padding(32.dp),
-        contentAlignment = Alignment.Center
-    ) {
-        Column(
-            horizontalAlignment = Alignment.CenterHorizontally,
-            verticalArrangement = Arrangement.Center
-        ) {
-            Box(
-                modifier = Modifier
-                    .size(96.dp)
-                    .clip(CircleShape)
-                    .background(EmeraldGlow)
-                    .border(2.dp, Emerald400.copy(alpha = 0.5f), CircleShape),
-                contentAlignment = Alignment.Center
-            ) {
-                Icon(
-                    imageVector = Icons.Default.FlashOn,
-                    contentDescription = "App Logo",
-                    tint = Emerald400,
-                    modifier = Modifier.size(54.dp)
-                )
-            }
-
-            Spacer(modifier = Modifier.height(24.dp))
-
-            Text(
-                text = "Rapido Auto Accept",
-                fontSize = 24.sp,
-                fontWeight = FontWeight.Bold,
-                color = Slate50,
-                textAlign = TextAlign.Center
-            )
-
-            Spacer(modifier = Modifier.height(6.dp))
-
-            Text(
-                text = "Premium Automation Suite",
-                fontSize = 14.sp,
-                fontWeight = FontWeight.Medium,
-                color = Slate400,
-                textAlign = TextAlign.Center
-            )
-        }
-
-        Column(
-            modifier = Modifier
-                .align(Alignment.BottomCenter)
-                .padding(bottom = 32.dp),
-            horizontalAlignment = Alignment.CenterHorizontally,
-            verticalArrangement = Arrangement.spacedBy(12.dp)
-        ) {
-            CircularProgressIndicator(
-                color = Cyan400,
-                strokeWidth = 3.dp,
-                modifier = Modifier.size(32.dp)
-            )
-
-            Text(
-                text = "Loading license data...",
-                fontSize = 12.sp,
-                color = Slate400,
-                textAlign = TextAlign.Center
-            )
-        }
-    }
-}
 
 /**
  * Visual Log View Card in Dashboard:
@@ -2780,11 +2719,35 @@ fun VisualLogViewCard(
         serviceEvents.count { it.type == ServiceEventType.ORDER_IGNORED }
     }
 
+    val pulseScale = remember { Animatable(1f) }
+    LaunchedEffect(acceptedCount) {
+        if (acceptedCount > 0) {
+            pulseScale.animateTo(
+                targetValue = 1.02f,
+                animationSpec = tween(150)
+            )
+            pulseScale.animateTo(
+                targetValue = 1f,
+                animationSpec = tween(300)
+            )
+        }
+    }
+
+    val sessionEarnings = remember(serviceEvents) {
+        serviceEvents.filter { it.type == ServiceEventType.ORDER_ACCEPTED }
+            .mapNotNull { event ->
+                val match = Regex("₹([0-9]+)").find(event.description) ?: Regex("₹([0-9]+)").find(event.title)
+                match?.groupValues?.get(1)?.toIntOrNull()
+            }
+            .sum()
+    }
+
     val displayedEvents = if (isExpanded) filteredEvents else filteredEvents.take(5)
 
     Card(
         modifier = Modifier
             .fillMaxWidth()
+            .scale(pulseScale.value)
             .testTag("visual_log_card"),
         shape = RoundedCornerShape(22.dp),
         colors = CardDefaults.cardColors(containerColor = Slate900),
@@ -2794,6 +2757,49 @@ fun VisualLogViewCard(
             modifier = Modifier.padding(16.dp),
             verticalArrangement = Arrangement.spacedBy(14.dp)
         ) {
+            // Session Summary Header
+            Surface(
+                modifier = Modifier.fillMaxWidth(),
+                shape = RoundedCornerShape(12.dp),
+                color = androidx.compose.ui.graphics.Color(0xFF064E3B).copy(alpha = 0.3f),
+                border = BorderStroke(1.dp, Emerald500.copy(alpha = 0.5f))
+            ) {
+                Row(
+                    modifier = Modifier.padding(12.dp),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Column {
+                        Text(
+                            text = "SESSION EARNINGS",
+                            fontSize = 10.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = Emerald400
+                        )
+                        Text(
+                            text = "₹$sessionEarnings",
+                            fontSize = 18.sp,
+                            fontWeight = FontWeight.Black,
+                            color = Slate50
+                        )
+                    }
+                    Column(horizontalAlignment = Alignment.End) {
+                        Text(
+                            text = "ACCEPTED RIDES",
+                            fontSize = 10.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = Emerald400
+                        )
+                        Text(
+                            text = "$acceptedCount",
+                            fontSize = 18.sp,
+                            fontWeight = FontWeight.Black,
+                            color = Slate50
+                        )
+                    }
+                }
+            }
+
             // Header Row
             Row(
                 modifier = Modifier.fillMaxWidth(),
@@ -3281,6 +3287,7 @@ fun SettingsTabContent(
     val context = LocalContext.current
     val coroutineScope = rememberCoroutineScope()
     var isCheckingUpdates by remember { mutableStateOf(false) }
+    var searchQuery by remember { mutableStateOf("") }
 
     var showDistanceInfo by remember { mutableStateOf(false) }
     var showPriceInfo by remember { mutableStateOf(false) }
@@ -3341,6 +3348,44 @@ fun SettingsTabContent(
             .testTag("settings_screen"),
         verticalArrangement = Arrangement.spacedBy(16.dp)
     ) {
+        // Search Bar
+        OutlinedTextField(
+            value = searchQuery,
+            onValueChange = { searchQuery = it },
+            placeholder = { Text("Search settings or blacklist...", color = Slate400, fontSize = 14.sp) },
+            leadingIcon = {
+                Icon(
+                    imageVector = Icons.Default.Info,
+                    contentDescription = "Search",
+                    tint = Slate400
+                )
+            },
+            trailingIcon = {
+                if (searchQuery.isNotEmpty()) {
+                    IconButton(onClick = { searchQuery = "" }) {
+                        Icon(
+                            imageVector = Icons.Default.Close,
+                            contentDescription = "Clear search",
+                            tint = Slate400
+                        )
+                    }
+                }
+            },
+            modifier = Modifier
+                .fillMaxWidth()
+                .testTag("settings_search_bar"),
+            shape = RoundedCornerShape(12.dp),
+            colors = androidx.compose.material3.OutlinedTextFieldDefaults.colors(
+                focusedContainerColor = Slate900,
+                unfocusedContainerColor = Slate900,
+                focusedBorderColor = Emerald500,
+                unfocusedBorderColor = Slate800,
+                focusedTextColor = Slate50,
+                unfocusedTextColor = Slate300
+            ),
+            singleLine = true
+        )
+
         // =========================================================================
         SettingsSectionHeader("PERMISSIONS & REQUIREMENTS", showDivider = false)
         // 1. SYSTEM PERMISSIONS CARD
@@ -3734,6 +3779,10 @@ fun SettingsTabContent(
 
         // =========================================================================
         SettingsSectionHeader("SMART FILTERS (PREMIUM)")
+        
+        val q = searchQuery.lowercase()
+        
+        if (q.isEmpty() || "distance".contains(q) || "max pickup".contains(q) || "km".contains(q)) {
             // 2. DISTANCE FILTER CARD (PREMIUM FEATURE)
             // =========================================================================
             Card(
@@ -4986,3 +5035,5 @@ fun SettingsTabContent(
 }
 
 
+
+}
