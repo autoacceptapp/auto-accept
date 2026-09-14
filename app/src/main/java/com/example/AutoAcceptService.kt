@@ -1950,25 +1950,26 @@ fun getCustomSoundUri(context: Context): String? {
 
     private fun startForegroundNotification() {
         try {
-            createNotificationChannels(this)
-            val notification = buildForegroundNotification(this)
-
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
-                try {
-                    startForeground(
-                        NOTIFICATION_ID,
-                        notification,
-                        ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE
-                    )
-                } catch (e: Throwable) {
-                    startForeground(NOTIFICATION_ID, notification)
+            val accActive = isServiceConnected()
+            val notifActive = isNotificationListenerEnabled(this)
+            val batActive = isBatteryOptimizationIgnored(this)
+            val masterOn = isAutomationEnabled(this)
+            
+            val notificationManager = getSystemService(android.content.Context.NOTIFICATION_SERVICE) as android.app.NotificationManager
+            
+            if (accActive && notifActive && batActive && masterOn) {
+                if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.N) {
+                    stopForeground(android.app.Service.STOP_FOREGROUND_REMOVE)
+                } else {
+                    stopForeground(true)
                 }
+                notificationManager.cancel(NOTIFICATION_ID)
+                android.util.Log.i(TAG, "All services healthy. Removed persistent foreground notification.")
             } else {
-                startForeground(NOTIFICATION_ID, notification)
+                ServiceStatusNotificationManager.startOrUpdateForeground(this)
             }
-            Log.i(TAG, "AutoAcceptService foreground notification started on channel $NOTIFICATION_CHANNEL_ID")
         } catch (e: Exception) {
-            Log.e(TAG, "Failed to start foreground notification on AutoAcceptService: ${e.message}", e)
+            android.util.Log.e(TAG, "Failed to manage foreground notification: ${e.message}", e)
         }
 
         if (isAutomationEnabled(this)) {
@@ -1976,7 +1977,6 @@ fun getCustomSoundUri(context: Context): String? {
         }
         ServiceStatusNotificationManager.updateStatus(this)
     }
-
     /**
      * Updates the foreground notification text dynamically during ride lifecycle.
      */

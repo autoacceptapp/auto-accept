@@ -1,3 +1,4 @@
+cat << 'INNER_EOF' > /tmp/ServiceStatusNotificationManager.kt
 package com.example
 
 import android.Manifest
@@ -335,3 +336,5 @@ object ServiceStatusNotificationManager {
         }
     }
 }
+INNER_EOF
+cp /tmp/ServiceStatusNotificationManager.kt app/src/main/java/com/example/ServiceStatusNotificationManager.kt

@@ -1555,35 +1555,10 @@ fun OrderHistoryTabContent(
                 },
                 modifier = Modifier.testTag("tab_ignored_logs")
             )
-            Tab(
-                selected = selectedFilterTab == 3,
-                onClick = { selectedFilterTab = 3 },
-                text = {
-                    Text(
-                        text = "🔥 Peak Heatmap",
-                        fontWeight = if (selectedFilterTab == 3) FontWeight.Bold else FontWeight.Normal,
-                        color = if (selectedFilterTab == 3) Amber400 else Slate400,
-                        fontSize = 11.sp
-                    )
-                },
-                modifier = Modifier.testTag("tab_peak_hours_heatmap")
-            )
         }
 
-        // Logs List or Peak Heatmap View
-        if (selectedFilterTab == 3) {
-            Column(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .weight(1f)
-                    .verticalScroll(rememberScrollState())
-            ) {
-                com.example.ui.PeakHoursHeatmapCard(
-                    rideLogs = rideLogs,
-                    modifier = Modifier.testTag("tab2_peak_hours_heatmap_card")
-                )
-            }
-        } else if (isLogsLoading && rideLogs.isEmpty()) {
+        // Logs List
+        if (isLogsLoading && rideLogs.isEmpty()) {
             Box(
                 modifier = Modifier
                     .fillMaxWidth()

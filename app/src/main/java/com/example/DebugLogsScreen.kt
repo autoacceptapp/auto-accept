@@ -503,39 +503,6 @@ fun DebugLogsScreen(
                             )
                         }
                     }
-
-                    // Simulate Diagnostic Button
-                    Surface(
-                        shape = RoundedCornerShape(8.dp),
-                        color = Slate900,
-                        border = BorderStroke(1.dp, Slate800),
-                        modifier = Modifier
-                            .clip(RoundedCornerShape(8.dp))
-                            .clickable {
-                                DebugLogManager.simulateSampleMissedOrder()
-                                Toast.makeText(context, "Added simulated diagnostic event", Toast.LENGTH_SHORT).show()
-                            }
-                            .testTag("btn_simulate_diagnostic_event")
-                    ) {
-                        Row(
-                            modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            Icon(
-                                imageVector = Icons.Default.PlayArrow,
-                                contentDescription = null,
-                                tint = Amber400,
-                                modifier = Modifier.size(13.dp)
-                            )
-                            Spacer(modifier = Modifier.width(4.dp))
-                            Text(
-                                text = "Simulate",
-                                fontSize = 10.sp,
-                                fontWeight = FontWeight.Bold,
-                                color = Amber400
-                            )
-                        }
-                    }
                 }
             }
         }
@@ -631,14 +598,6 @@ fun DebugLogsScreen(
                         textAlign = androidx.compose.ui.text.style.TextAlign.Center,
                         modifier = Modifier.padding(horizontal = 16.dp)
                     )
-                    Spacer(modifier = Modifier.height(14.dp))
-                    Button(
-                        onClick = { DebugLogManager.simulateSampleMissedOrder() },
-                        colors = ButtonDefaults.buttonColors(containerColor = Cyan500),
-                        shape = RoundedCornerShape(8.dp)
-                    ) {
-                        Text("Add Test Log", color = Color.Black, fontWeight = FontWeight.Bold, fontSize = 12.sp)
-                    }
                 }
             }
         } else {

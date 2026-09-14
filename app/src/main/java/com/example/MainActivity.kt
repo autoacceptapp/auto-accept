@@ -1005,11 +1005,6 @@ if (showGoalEditDialog) {
                         }
                         Spacer(modifier = Modifier.weight(1f))
 
-                        // Success Streak TopAppBar Badge
-                        SuccessStreakTopBarBadge(
-                            streak = successStreak,
-                            modifier = Modifier.testTag("topbar_streak_badge")
-                        )
                         Spacer(modifier = Modifier.width(6.dp))
 
                         Surface(
@@ -1301,27 +1296,6 @@ if (showGoalEditDialog) {
                             .verticalScroll(rememberScrollState()),
                         verticalArrangement = Arrangement.spacedBy(16.dp)
                     ) {
-
-                        // =========================================================================
-                        // TAB 0 HEADER: GAMIFIED SUCCESS STREAK COUNTER
-                        // =========================================================================
-                        SuccessStreakHeaderCard(
-                            streak = successStreak,
-                            bestStreak = bestSuccessStreak,
-                            onSimulateAccepted = {
-                                AutoAcceptService.recordAcceptedStreak(context)
-                                Toast.makeText(context, "🔥 Ride accepted! Streak: ${successStreak + 1}", Toast.LENGTH_SHORT).show()
-                            },
-                            onSimulateMissed = {
-                                AutoAcceptService.resetSuccessStreak(context)
-                                Toast.makeText(context, "⚠️ Ride missed! Streak reset to 0", Toast.LENGTH_SHORT).show()
-                            },
-                            onResetStreak = {
-                                AutoAcceptService.resetSuccessStreak(context)
-                                Toast.makeText(context, "Streak reset to 0", Toast.LENGTH_SHORT).show()
-                            },
-                            modifier = Modifier.testTag("tab0_success_streak_header")
-                        )
 
             // =========================================================================
             // 0. DUAL-LOCK SUBSCRIPTION & PAYWALL SYSTEM CARD
@@ -2368,15 +2342,6 @@ if (showGoalEditDialog) {
                         }
                     }
                 }
-
-            // =========================================================================
-            // PEAK RIDE REQUEST HOURS HEATMAP (D3/RECHARTS VISUALIZATION)
-            // =========================================================================
-            com.example.ui.PeakHoursHeatmapCard(
-                rideLogs = rideLogs,
-                tripHistory = tripHistory,
-                modifier = Modifier.testTag("dashboard_peak_hours_heatmap_card")
-            )
 
             // =========================================================================
             VisualLogViewCard(
@@ -4233,6 +4198,72 @@ fun SettingsTabContent(
                             Text(if (isBatteryOptimizationIgnored) "Settings" else "Fix", fontSize = 12.sp, fontWeight = FontWeight.Bold)
                         }
                     }
+
+                // 3. Auto-Start Permission
+                androidx.compose.material3.Surface(
+                    shape = androidx.compose.foundation.shape.RoundedCornerShape(14.dp),
+                    color = Slate950,
+                    border = androidx.compose.foundation.BorderStroke(1.dp, Slate800),
+                    modifier = androidx.compose.ui.Modifier.fillMaxWidth()
+                ) {
+                    androidx.compose.foundation.layout.Row(
+                        modifier = androidx.compose.ui.Modifier
+                            .fillMaxWidth()
+                            .padding(12.dp),
+                        horizontalArrangement = androidx.compose.foundation.layout.Arrangement.SpaceBetween,
+                        verticalAlignment = androidx.compose.ui.Alignment.CenterVertically
+                    ) {
+                        androidx.compose.foundation.layout.Column(modifier = androidx.compose.ui.Modifier.weight(1f)) {
+                            androidx.compose.material3.Text(
+                                text = "Auto-Start Permission",
+                                style = androidx.compose.material3.MaterialTheme.typography.bodyMedium,
+                                fontWeight = androidx.compose.ui.text.font.FontWeight.SemiBold,
+                                color = Slate100
+                            )
+                            androidx.compose.foundation.layout.Spacer(modifier = androidx.compose.ui.Modifier.height(2.dp))
+                            androidx.compose.material3.Text(
+                                text = "Required for Xiaomi, HyperOS, Vivo, and Oppo devices to prevent OS battery killers from terminating the service",
+                                fontSize = 11.sp,
+                                color = Slate400
+                            )
+                        }
+                        androidx.compose.foundation.layout.Spacer(modifier = androidx.compose.ui.Modifier.width(8.dp))
+                        androidx.compose.material3.Button(
+                            onClick = {
+                                try {
+                                    val intent = android.content.Intent().apply {
+                                        component = android.content.ComponentName("com.miui.securitycenter", "com.miui.permcenter.autostart.AutoStartManagementActivity")
+                                        flags = android.content.Intent.FLAG_ACTIVITY_NEW_TASK
+                                    }
+                                    context.startActivity(intent)
+                                } catch (e: Exception) {
+                                    try {
+                                        val oppoIntent = android.content.Intent().apply {
+                                            component = android.content.ComponentName("com.coloros.safecenter", "com.coloros.safecenter.permission.startup.StartupAppListActivity")
+                                            flags = android.content.Intent.FLAG_ACTIVITY_NEW_TASK
+                                        }
+                                        context.startActivity(oppoIntent)
+                                    } catch (e2: Exception) {
+                                        val fallback = android.content.Intent(android.provider.Settings.ACTION_APPLICATION_DETAILS_SETTINGS).apply {
+                                            data = android.net.Uri.parse("package:${context.packageName}")
+                                            flags = android.content.Intent.FLAG_ACTIVITY_NEW_TASK
+                                        }
+                                        context.startActivity(fallback)
+                                    }
+                                }
+                            },
+                            shape = androidx.compose.foundation.shape.RoundedCornerShape(10.dp),
+                            colors = androidx.compose.material3.ButtonDefaults.buttonColors(
+                                containerColor = Slate800,
+                                contentColor = Slate300
+                            ),
+                            contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 12.dp, vertical = 6.dp)
+                        ) {
+                            androidx.compose.material3.Text("Settings", fontSize = 12.sp, fontWeight = androidx.compose.ui.text.font.FontWeight.Bold)
+                        }
+                    }
+                }
+
                 }
 
                 // 3. Display Over Other Apps
@@ -4375,18 +4406,6 @@ fun SettingsTabContent(
                 }
             }
         }
-
-        // =========================================================================
-        SettingsSectionHeader("ACCESSIBILITY TROUBLESHOOTING & FAQ")
-        // =========================================================================
-        com.example.ui.AccessibilityFaqSection(
-            onOpenAccessibility = onOpenAccessibility,
-            onOpenBatteryOptimization = onOpenBatteryOptimization,
-            onOpenOverlay = onOpenOverlay,
-            onOpenNotificationListener = onOpenNotificationListener,
-            initialSearchQuery = searchQuery,
-            modifier = Modifier.testTag("settings_accessibility_faq_section")
-        )
 
         // =========================================================================
         SettingsSectionHeader("CORE AUTOMATION")
