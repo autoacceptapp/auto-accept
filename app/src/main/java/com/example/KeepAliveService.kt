@@ -40,7 +40,7 @@ class KeepAliveService : Service() {
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         val notification = ServiceStatusNotificationManager.buildNotification(this)
         try {
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
                 try {
                     startForeground(
                         ServiceStatusNotificationManager.NOTIFICATION_ID, 

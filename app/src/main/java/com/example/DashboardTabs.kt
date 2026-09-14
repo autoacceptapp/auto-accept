@@ -913,37 +913,6 @@ fun ProfileEarningsTabContent(
                     }
                 }
 
-                // Points summary banner & Redeem cost hint
-                Surface(
-                    shape = RoundedCornerShape(12.dp),
-                    color = Slate950,
-                    border = BorderStroke(1.dp, Slate800),
-                    modifier = Modifier.fillMaxWidth()
-                ) {
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(horizontal = 10.dp, vertical = 8.dp),
-                        horizontalArrangement = Arrangement.SpaceAround,
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                            Text(text = "DAILY PASS", fontSize = 9.sp, fontWeight = FontWeight.Bold, color = Slate500)
-                            Text(text = "${SubscriptionManager.POINTS_DAILY_PASS} 🪙", fontSize = 12.sp, fontWeight = FontWeight.Bold, color = Emerald400)
-                        }
-                        Box(modifier = Modifier.width(1.dp).height(20.dp).background(Slate800))
-                        Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                            Text(text = "WEEKLY PASS", fontSize = 9.sp, fontWeight = FontWeight.Bold, color = Slate500)
-                            Text(text = "${SubscriptionManager.POINTS_WEEKLY_PASS} 🪙", fontSize = 12.sp, fontWeight = FontWeight.Bold, color = Cyan400)
-                        }
-                        Box(modifier = Modifier.width(1.dp).height(20.dp).background(Slate800))
-                        Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                            Text(text = "MONTHLY PASS", fontSize = 9.sp, fontWeight = FontWeight.Bold, color = Slate500)
-                            Text(text = "${SubscriptionManager.POINTS_MONTHLY_PASS} 🪙", fontSize = 12.sp, fontWeight = FontWeight.Bold, color = Amber400)
-                        }
-                    }
-                }
-
                 // Refer & Earn card description requested:
                 // "Share your referral link with friends. When they install the app, you both get 20 Points!"
                 Surface(
@@ -1586,10 +1555,35 @@ fun OrderHistoryTabContent(
                 },
                 modifier = Modifier.testTag("tab_ignored_logs")
             )
+            Tab(
+                selected = selectedFilterTab == 3,
+                onClick = { selectedFilterTab = 3 },
+                text = {
+                    Text(
+                        text = "🔥 Peak Heatmap",
+                        fontWeight = if (selectedFilterTab == 3) FontWeight.Bold else FontWeight.Normal,
+                        color = if (selectedFilterTab == 3) Amber400 else Slate400,
+                        fontSize = 11.sp
+                    )
+                },
+                modifier = Modifier.testTag("tab_peak_hours_heatmap")
+            )
         }
 
-        // Logs List
-        if (isLogsLoading && rideLogs.isEmpty()) {
+        // Logs List or Peak Heatmap View
+        if (selectedFilterTab == 3) {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .weight(1f)
+                    .verticalScroll(rememberScrollState())
+            ) {
+                com.example.ui.PeakHoursHeatmapCard(
+                    rideLogs = rideLogs,
+                    modifier = Modifier.testTag("tab2_peak_hours_heatmap_card")
+                )
+            }
+        } else if (isLogsLoading && rideLogs.isEmpty()) {
             Box(
                 modifier = Modifier
                     .fillMaxWidth()

@@ -20,6 +20,7 @@ object FirebaseHelper {
                         .setApiKey("AIzaSyD-49I1kwAqY94qoNKroVQY21wpsYyy06c")
                         .setDatabaseUrl("https://auto-accept-app-default-rtdb.asia-southeast1.firebasedatabase.app")
                         .setStorageBucket("auto-accept-app.firebasestorage.app")
+                        .setGcmSenderId("675050958546")
                         .build()
                     FirebaseApp.initializeApp(context, options)
                     Log.i("FirebaseHelper", "FirebaseApp initialized successfully with explicit FirebaseOptions")

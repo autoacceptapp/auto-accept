@@ -1,4 +1,5 @@
 package com.example
+import android.annotation.SuppressLint
 import androidx.compose.ui.graphics.Brush
 
 import android.Manifest
@@ -16,6 +17,7 @@ import android.text.TextUtils
 import android.util.Log
 import android.widget.Toast
 import androidx.activity.ComponentActivity
+import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
@@ -52,6 +54,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.ArrowForward
 import androidx.compose.material.icons.automirrored.filled.List
 import androidx.compose.material.icons.automirrored.filled.VolumeUp
 import androidx.compose.material.icons.filled.AccountCircle
@@ -83,6 +86,7 @@ import androidx.compose.material.icons.filled.SystemUpdate
 import androidx.compose.material.icons.filled.TrendingUp
 import androidx.compose.material.icons.filled.Tune
 import androidx.compose.material.icons.filled.Payment
+import androidx.compose.material.icons.filled.FilterList
 import androidx.compose.material.icons.filled.Share
 import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material.icons.filled.Info
@@ -244,6 +248,7 @@ class MainActivity : ComponentActivity(), TextToSpeech.OnInitListener {
     private var pendingUtrListener: ListenerRegistration? = null
 
     // Runtime POST_NOTIFICATIONS permission launcher for Android 13+ (API 33)
+    @SuppressLint("InvalidFragmentVersionForActivityResult")
     private val notificationPermissionLauncher = registerForActivityResult(
         ActivityResultContracts.RequestPermission()
     ) { isGranted ->
@@ -275,20 +280,39 @@ class MainActivity : ComponentActivity(), TextToSpeech.OnInitListener {
         FirebaseHelper.initialize(this)
         RemoteConfigManager.init(this)
 
-        // Retrieve and log FCM registration token
+        // Safely retrieve FCM registration token if running on a real device with Google Play Services
         try {
-            FirebaseMessaging.getInstance().token.addOnCompleteListener { task ->
-                if (task.isSuccessful) {
-                    val token = task.result
-                    Log.d("MainActivity", "Firebase Cloud Messaging Token: $token")
-                    val prefs = getSharedPreferences(AutoAcceptService.PREFS_NAME, Context.MODE_PRIVATE)
-                    prefs.edit().putString("fcm_registration_token", token).apply()
+            val isEmulator = Build.FINGERPRINT.startsWith("generic")
+                || Build.FINGERPRINT.startsWith("unknown")
+                || Build.MODEL.contains("google_sdk")
+                || Build.MODEL.contains("Emulator")
+                || Build.MODEL.contains("Android SDK built for x86")
+                || Build.HARDWARE.contains("goldfish")
+                || Build.HARDWARE.contains("ranchu")
+                || Build.PRODUCT.contains("sdk")
+
+            if (!isEmulator) {
+                val availability = com.google.android.gms.common.GoogleApiAvailability.getInstance()
+                val resultCode = availability.isGooglePlayServicesAvailable(this)
+                if (resultCode == com.google.android.gms.common.ConnectionResult.SUCCESS) {
+                    FirebaseMessaging.getInstance().token.addOnCompleteListener { task ->
+                        if (task.isSuccessful) {
+                            val token = task.result
+                            Log.d("MainActivity", "Firebase Cloud Messaging Token: $token")
+                            val prefs = getSharedPreferences(AutoAcceptService.PREFS_NAME, Context.MODE_PRIVATE)
+                            prefs.edit().putString("fcm_registration_token", token).apply()
+                        } else {
+                            Log.w("MainActivity", "Fetching FCM registration token skipped or failed: ${task.exception?.message}")
+                        }
+                    }
                 } else {
-                    Log.w("MainActivity", "Fetching FCM registration token failed: ${task.exception?.message}")
+                    Log.i("MainActivity", "Google Play Services not available (code: $resultCode); skipping FCM token retrieval.")
                 }
+            } else {
+                Log.d("MainActivity", "Running in emulator environment; skipping FCM token retrieval to avoid hard failure exceptions.")
             }
-        } catch (e: Exception) {
-            Log.w("MainActivity", "FCM token retrieval error: ${e.message}")
+        } catch (e: Throwable) {
+            Log.w("MainActivity", "FCM token check error: ${e.message}")
         }
 
         // Load persisted ride history from local device storage
@@ -809,8 +833,11 @@ fun AutoAcceptDashboardScreen(
 
 
     val dailyTripCount by AutoAcceptService.dailyTripCount.collectAsStateWithLifecycle()
+    val successStreak by AutoAcceptService.successStreak.collectAsStateWithLifecycle()
+    val bestSuccessStreak by AutoAcceptService.bestSuccessStreak.collectAsStateWithLifecycle()
 var dailyGoal by remember { mutableStateOf(AutoAcceptService.getDailyGoal(context)) }
     var showGoalEditDialog by remember { mutableStateOf(false) }
+    var showPreferencesScreen by remember { mutableStateOf(false) }
     var goalInputText by remember { mutableStateOf(dailyGoal.toString()) }
     val tripHistory by AutoAcceptService.tripHistory.collectAsStateWithLifecycle()
 
@@ -844,6 +871,7 @@ var dailyGoal by remember { mutableStateOf(AutoAcceptService.getDailyGoal(contex
 
     LaunchedEffect(Unit) {
         AutoAcceptService.syncDailyTripCount(context)
+        AutoAcceptService.syncSuccessStreak(context)
         val target = (context as? Activity)?.intent?.getIntExtra("TARGET_TAB", -1) ?: -1
 
         if (target in 0..4) {
@@ -916,6 +944,16 @@ if (showGoalEditDialog) {
         )
     }
 
+    if (showPreferencesScreen) {
+        BackHandler {
+            showPreferencesScreen = false
+        }
+        com.example.ui.PreferencesScreen(
+            onNavigateBack = { showPreferencesScreen = false }
+        )
+        return
+    }
+
     Scaffold(
         topBar = {
             TopAppBar(
@@ -954,6 +992,14 @@ if (showGoalEditDialog) {
                             )
                         }
                         Spacer(modifier = Modifier.weight(1f))
+
+                        // Success Streak TopAppBar Badge
+                        SuccessStreakTopBarBadge(
+                            streak = successStreak,
+                            modifier = Modifier.testTag("topbar_streak_badge")
+                        )
+                        Spacer(modifier = Modifier.width(6.dp))
+
                         Surface(
                             shape = RoundedCornerShape(16.dp),
                             color = if (isMasterSwitchOn && isAccessibilityEnabled) Color(0x2610B981) else Color(0x26EF4444),
@@ -984,6 +1030,16 @@ if (showGoalEditDialog) {
                     }
                 },
                 actions = {
+                    IconButton(
+                        onClick = { showPreferencesScreen = true },
+                        modifier = Modifier.testTag("topbar_preferences_button")
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Tune,
+                            contentDescription = "Ride Preferences",
+                            tint = Cyan400
+                        )
+                    }
                     if (currentUser != null) {
                         val user = currentUser!!
                         Row(
@@ -1234,6 +1290,27 @@ if (showGoalEditDialog) {
                         verticalArrangement = Arrangement.spacedBy(16.dp)
                     ) {
 
+                        // =========================================================================
+                        // TAB 0 HEADER: GAMIFIED SUCCESS STREAK COUNTER
+                        // =========================================================================
+                        SuccessStreakHeaderCard(
+                            streak = successStreak,
+                            bestStreak = bestSuccessStreak,
+                            onSimulateAccepted = {
+                                AutoAcceptService.recordAcceptedStreak(context)
+                                Toast.makeText(context, "🔥 Ride accepted! Streak: ${successStreak + 1}", Toast.LENGTH_SHORT).show()
+                            },
+                            onSimulateMissed = {
+                                AutoAcceptService.resetSuccessStreak(context)
+                                Toast.makeText(context, "⚠️ Ride missed! Streak reset to 0", Toast.LENGTH_SHORT).show()
+                            },
+                            onResetStreak = {
+                                AutoAcceptService.resetSuccessStreak(context)
+                                Toast.makeText(context, "Streak reset to 0", Toast.LENGTH_SHORT).show()
+                            },
+                            modifier = Modifier.testTag("tab0_success_streak_header")
+                        )
+
             // =========================================================================
             // 0. DUAL-LOCK SUBSCRIPTION & PAYWALL SYSTEM CARD
             // =========================================================================
@@ -1400,27 +1477,6 @@ if (showGoalEditDialog) {
                                             fontSize = 12.sp,
                                             fontWeight = FontWeight.Bold,
                                             color = Slate200
-                                        )
-                                    }
-
-                                    Row(
-                                        modifier = Modifier.fillMaxWidth(),
-                                        horizontalArrangement = Arrangement.SpaceBetween,
-                                        verticalAlignment = Alignment.CenterVertically
-                                    ) {
-                                        Text(
-                                            text = "DEVICE ID",
-                                            fontSize = 10.sp,
-                                            fontWeight = FontWeight.Bold,
-                                            color = Slate500,
-                                            letterSpacing = 0.6.sp
-                                        )
-                                        Text(
-                                            text = androidId,
-                                            fontSize = 11.sp,
-                                            fontFamily = FontFamily.Monospace,
-                                            color = Slate400,
-                                            maxLines = 1
                                         )
                                     }
                                 }
@@ -1934,15 +1990,6 @@ if (showGoalEditDialog) {
             }
 
             // =========================================================================
-            // SERVICE STATUS MONITOR DASHBOARD WIDGET
-            // =========================================================================
-            ServiceStatusDashboardWidget(
-                onNavigateToDebugLogs = { selectedTab = 3 }
-            )
-
-            // =========================================================================
-// =========================================================================
-// =========================================================================
             // DAILY GOAL CARD
             // =========================================================================
             Card(
@@ -2010,55 +2057,17 @@ if (showGoalEditDialog) {
                 }
             }
 
-            // BATTERY OPTIMIZATION WARNING
-            // =========================================================================
-            if (!isBatteryOptimizationIgnored && isAccessibilityEnabled) {
-                Card(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .testTag("battery_warning_card"),
-                    shape = RoundedCornerShape(16.dp),
-                    colors = CardDefaults.cardColors(containerColor = Color(0x1AF59E0B)),
-                    border = BorderStroke(1.dp, Color(0x4DF59E0B))
-                ) {
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(16.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(12.dp)
-                    ) {
-                        Icon(
-                            imageVector = Icons.Default.Warning,
-                            contentDescription = "Warning",
-                            tint = Amber500,
-                            modifier = Modifier.size(28.dp)
-                        )
-                        Column(modifier = Modifier.weight(1f)) {
-                            Text(
-                                text = "Battery Optimization Enabled",
-                                style = MaterialTheme.typography.titleSmall,
-                                fontWeight = FontWeight.Bold,
-                                color = Amber400
-                            )
-                            Text(
-                                text = "This may cause Android to aggressively kill the auto-accept service in the background. Please unrestrict battery usage.",
-                                fontSize = 11.sp,
-                                lineHeight = 14.sp,
-                                color = Slate200
-                            )
-                        }
-                        Button(
-                            onClick = { openBatteryOptimizationSettings(context) },
-                            colors = ButtonDefaults.buttonColors(containerColor = Amber500, contentColor = Slate950),
-                            shape = RoundedCornerShape(10.dp),
-                            contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp)
-                        ) {
-                            Text("Fix", fontSize = 12.sp, fontWeight = FontWeight.Bold)
-                        }
-                    }
-                }
-            }
+            // DEDICATED ACCESSIBILITY SERVICE TOGGLE CARD
+            // Direct in-app switch to enable or disable the AccessibilityService without navigating to system settings
+            com.example.ui.AccessibilityServiceToggleCard(
+                isServiceEnabled = isAccessibilityEnabled,
+                onServiceStateChanged = { enabled ->
+                    isAccessibilityEnabled = enabled
+                    ServiceStatusNotificationManager.updateStatus(context)
+                    ServiceStatusWidgetProvider.updateAllWidgets(context)
+                },
+                modifier = Modifier.testTag("dashboard_accessibility_toggle_card")
+            )
 
             // 1. MASTER AUTO-ACCEPT SWITCH CARD
             // =========================================================================
@@ -2349,6 +2358,15 @@ if (showGoalEditDialog) {
                 }
 
             // =========================================================================
+            // PEAK RIDE REQUEST HOURS HEATMAP (D3/RECHARTS VISUALIZATION)
+            // =========================================================================
+            com.example.ui.PeakHoursHeatmapCard(
+                rideLogs = rideLogs,
+                tripHistory = tripHistory,
+                modifier = Modifier.testTag("dashboard_peak_hours_heatmap_card")
+            )
+
+            // =========================================================================
             VisualLogViewCard(
                 serviceEvents = serviceEvents,
                 rawServiceLog = serviceLog,
@@ -2536,6 +2554,7 @@ if (showGoalEditDialog) {
             onUpdateAvailable = { updateInfo ->
                 updateInfoToPrompt = updateInfo
             },
+            onOpenPreferences = { showPreferencesScreen = true },
             ignoredCount = totalIgnoredCount
         )
     }
@@ -2688,6 +2707,15 @@ if (showGoalEditDialog) {
 
 
 /**
+ * Filter categories for the Live Activity Feed
+ */
+enum class LiveFeedFilter(val label: String) {
+    ALL("All"),
+    ACCEPTED("Accepted"),
+    MISSED("Missed")
+}
+
+/**
  * Visual Log View Card in Dashboard:
  * Displays recent events caught by AutoAcceptService such as 'Ride detected',
  * 'Order accepted', 'Order queued', or filter rejections.
@@ -2701,27 +2729,33 @@ fun VisualLogViewCard(
     onSimulateTest: () -> Unit,
     onClearEvents: () -> Unit
 ) {
-    var selectedFilter by remember { mutableStateOf(0) } // 0 = All, 1 = Detected, 2 = Accepted, 3 = Filtered
+    var selectedFilter by remember { mutableStateOf(LiveFeedFilter.ALL) }
     var isExpanded by remember { mutableStateOf(false) }
     var showRawConsole by remember { mutableStateOf(false) }
 
     val filteredEvents = remember(serviceEvents, selectedFilter) {
         when (selectedFilter) {
-            1 -> serviceEvents.filter { it.type == ServiceEventType.RIDE_DETECTED }
-            2 -> serviceEvents.filter { it.type == ServiceEventType.ORDER_ACCEPTED }
-            3 -> serviceEvents.filter { it.type == ServiceEventType.ORDER_IGNORED }
-            else -> serviceEvents
+            LiveFeedFilter.ACCEPTED -> serviceEvents.filter { it.type == ServiceEventType.ORDER_ACCEPTED }
+            LiveFeedFilter.MISSED -> serviceEvents.filter {
+                it.type == ServiceEventType.ORDER_IGNORED ||
+                it.description.contains("missed", ignoreCase = true) ||
+                it.title.contains("missed", ignoreCase = true) ||
+                it.badge.contains("missed", ignoreCase = true)
+            }
+            LiveFeedFilter.ALL -> serviceEvents
         }
     }
 
-    val detectedCount = remember(serviceEvents) {
-        serviceEvents.count { it.type == ServiceEventType.RIDE_DETECTED }
-    }
     val acceptedCount = remember(serviceEvents) {
         serviceEvents.count { it.type == ServiceEventType.ORDER_ACCEPTED }
     }
-    val ignoredCount = remember(serviceEvents) {
-        serviceEvents.count { it.type == ServiceEventType.ORDER_IGNORED }
+    val missedCount = remember(serviceEvents) {
+        serviceEvents.count {
+            it.type == ServiceEventType.ORDER_IGNORED ||
+            it.description.contains("missed", ignoreCase = true) ||
+            it.title.contains("missed", ignoreCase = true) ||
+            it.badge.contains("missed", ignoreCase = true)
+        }
     }
 
     val pulseScale = remember { Animatable(1f) }
@@ -2877,11 +2911,64 @@ fun VisualLogViewCard(
                     }
                 }
 
-                // Action icons: Simulate Test / Clear
+                // Action icons: Filter Toggle / Simulate Test / Clear
                 Row(
                     verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(4.dp)
+                    horizontalArrangement = Arrangement.spacedBy(6.dp)
                 ) {
+                    // Filter button to toggle between 'All', 'Accepted', and 'Missed'
+                    Surface(
+                        onClick = {
+                            selectedFilter = when (selectedFilter) {
+                                LiveFeedFilter.ALL -> LiveFeedFilter.ACCEPTED
+                                LiveFeedFilter.ACCEPTED -> LiveFeedFilter.MISSED
+                                LiveFeedFilter.MISSED -> LiveFeedFilter.ALL
+                            }
+                        },
+                        shape = RoundedCornerShape(10.dp),
+                        color = when (selectedFilter) {
+                            LiveFeedFilter.ALL -> Slate800
+                            LiveFeedFilter.ACCEPTED -> EmeraldGlow
+                            LiveFeedFilter.MISSED -> RoseGlow
+                        },
+                        border = BorderStroke(
+                            1.dp,
+                            when (selectedFilter) {
+                                LiveFeedFilter.ALL -> Slate700
+                                LiveFeedFilter.ACCEPTED -> Emerald500.copy(alpha = 0.6f)
+                                LiveFeedFilter.MISSED -> Rose500.copy(alpha = 0.6f)
+                            }
+                        ),
+                        modifier = Modifier.testTag("feed_filter_button")
+                    ) {
+                        Row(
+                            modifier = Modifier.padding(horizontal = 8.dp, vertical = 6.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(4.dp)
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.FilterList,
+                                contentDescription = "Toggle Filter",
+                                tint = when (selectedFilter) {
+                                    LiveFeedFilter.ALL -> Cyan400
+                                    LiveFeedFilter.ACCEPTED -> Emerald400
+                                    LiveFeedFilter.MISSED -> Rose400
+                                },
+                                modifier = Modifier.size(14.dp)
+                            )
+                            Text(
+                                text = selectedFilter.label,
+                                fontSize = 11.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = when (selectedFilter) {
+                                    LiveFeedFilter.ALL -> Slate200
+                                    LiveFeedFilter.ACCEPTED -> Emerald400
+                                    LiveFeedFilter.MISSED -> Rose400
+                                }
+                            )
+                        }
+                    }
+
                     Surface(
                         onClick = onSimulateTest,
                         shape = RoundedCornerShape(10.dp),
@@ -2927,38 +3014,51 @@ fun VisualLogViewCard(
                 }
             }
 
-            // Filter Chips Row
+            // Segmented Filter Toggle Bar ('All', 'Accepted', 'Missed')
             Row(
-                modifier = Modifier.fillMaxWidth(),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .testTag("feed_filter_segmented_row"),
                 horizontalArrangement = Arrangement.spacedBy(6.dp)
             ) {
                 val filters = listOf(
-                    "All (${serviceEvents.size})" to 0,
-                    "Detected ($detectedCount)" to 1,
-                    "Accepted ($acceptedCount)" to 2,
-                    "Filtered ($ignoredCount)" to 3
+                    Triple(LiveFeedFilter.ALL, "All (${serviceEvents.size})", "filter_all_button"),
+                    Triple(LiveFeedFilter.ACCEPTED, "Accepted ($acceptedCount)", "filter_accepted_button"),
+                    Triple(LiveFeedFilter.MISSED, "Missed ($missedCount)", "filter_missed_button")
                 )
-                filters.forEach { (label, index) ->
-                    val isSelected = selectedFilter == index
+                filters.forEach { (filterType, label, tag) ->
+                    val isSelected = selectedFilter == filterType
+                    val activeColor = when (filterType) {
+                        LiveFeedFilter.ALL -> Cyan400
+                        LiveFeedFilter.ACCEPTED -> Emerald400
+                        LiveFeedFilter.MISSED -> Rose400
+                    }
+                    val activeBg = when (filterType) {
+                        LiveFeedFilter.ALL -> CyanGlow
+                        LiveFeedFilter.ACCEPTED -> EmeraldGlow
+                        LiveFeedFilter.MISSED -> RoseGlow
+                    }
                     Surface(
-                        onClick = { selectedFilter = index },
+                        onClick = { selectedFilter = filterType },
                         shape = RoundedCornerShape(10.dp),
-                        color = if (isSelected) CyanGlow else Slate950,
+                        color = if (isSelected) activeBg else Slate950,
                         border = BorderStroke(
                             1.dp,
-                            if (isSelected) Cyan400.copy(alpha = 0.5f) else Slate800
+                            if (isSelected) activeColor.copy(alpha = 0.6f) else Slate800
                         ),
-                        modifier = Modifier.weight(1f)
+                        modifier = Modifier
+                            .weight(1f)
+                            .testTag(tag)
                     ) {
                         Box(
-                            modifier = Modifier.padding(vertical = 6.dp),
+                            modifier = Modifier.padding(vertical = 7.dp),
                             contentAlignment = Alignment.Center
                         ) {
                             Text(
                                 text = label,
-                                fontSize = 10.sp,
+                                fontSize = 11.sp,
                                 fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Medium,
-                                color = if (isSelected) Cyan300 else Slate400,
+                                color = if (isSelected) activeColor else Slate400,
                                 maxLines = 1
                             )
                         }
@@ -2989,20 +3089,36 @@ fun VisualLogViewCard(
                             contentAlignment = Alignment.Center
                         ) {
                             Icon(
-                                imageVector = Icons.Default.DirectionsCar,
+                                imageVector = when (selectedFilter) {
+                                    LiveFeedFilter.ALL -> Icons.Default.DirectionsCar
+                                    LiveFeedFilter.ACCEPTED -> Icons.Default.CheckCircle
+                                    LiveFeedFilter.MISSED -> Icons.Default.Block
+                                },
                                 contentDescription = null,
-                                tint = Slate500,
+                                tint = when (selectedFilter) {
+                                    LiveFeedFilter.ALL -> Slate500
+                                    LiveFeedFilter.ACCEPTED -> Emerald400
+                                    LiveFeedFilter.MISSED -> Rose400
+                                },
                                 modifier = Modifier.size(20.dp)
                             )
                         }
                         Text(
-                            text = "No events recorded yet",
+                            text = when (selectedFilter) {
+                                LiveFeedFilter.ALL -> "No events recorded yet"
+                                LiveFeedFilter.ACCEPTED -> "No accepted rides yet"
+                                LiveFeedFilter.MISSED -> "No missed rides recorded"
+                            },
                             fontSize = 13.sp,
                             fontWeight = FontWeight.SemiBold,
                             color = Slate300
                         )
                         Text(
-                            text = "When Rapido displays an order, 'Ride detected' & 'Order accepted' will appear here in real time.",
+                            text = when (selectedFilter) {
+                                LiveFeedFilter.ALL -> "When Rapido displays an order, 'Ride detected' & 'Order accepted' will appear here in real time."
+                                LiveFeedFilter.ACCEPTED -> "Rides successfully claimed by AutoAccept will appear here."
+                                LiveFeedFilter.MISSED -> "Rides that were skipped, filtered by threshold, or missed will appear here."
+                            },
                             fontSize = 11.sp,
                             color = Slate500,
                             textAlign = TextAlign.Center,
@@ -3286,6 +3402,7 @@ fun SettingsTabContent(
     onOpenOverlay: () -> Unit,
     onRefreshPermissions: () -> Unit,
     onUpdateAvailable: (GitHubUpdateManager.UpdateInfo) -> Unit,
+    onOpenPreferences: () -> Unit = {},
     ignoredCount: Int,
     modifier: Modifier = Modifier
 ) {
@@ -3353,6 +3470,83 @@ fun SettingsTabContent(
             .testTag("settings_screen"),
         verticalArrangement = Arrangement.spacedBy(16.dp)
     ) {
+        // Dedicated Preferences & Filtering Rules Hero Card
+        Card(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clickable { onOpenPreferences() }
+                .testTag("open_preferences_card"),
+            shape = RoundedCornerShape(20.dp),
+            colors = CardDefaults.cardColors(containerColor = Slate900),
+            border = BorderStroke(1.dp, Cyan500.copy(alpha = 0.5f))
+        ) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(16.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween
+            ) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    modifier = Modifier.weight(1f)
+                ) {
+                    Box(
+                        modifier = Modifier
+                            .size(44.dp)
+                            .clip(RoundedCornerShape(12.dp))
+                            .background(CyanGlow),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Tune,
+                            contentDescription = null,
+                            tint = Cyan400,
+                            modifier = Modifier.size(24.dp)
+                        )
+                    }
+                    Spacer(modifier = Modifier.width(14.dp))
+                    Column {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Text(
+                                text = "Ride Preferences & Rules",
+                                fontSize = 15.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = Slate100
+                            )
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Surface(
+                                shape = RoundedCornerShape(6.dp),
+                                color = EmeraldGlow,
+                                border = BorderStroke(1.dp, Emerald500.copy(alpha = 0.4f))
+                            ) {
+                                Text(
+                                    text = "ROOM DB",
+                                    fontSize = 9.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    color = Emerald400,
+                                    modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+                                )
+                            }
+                        }
+                        Spacer(modifier = Modifier.height(2.dp))
+                        Text(
+                            text = "Configure custom filtering rules, minimum fare, distance & passenger rating",
+                            fontSize = 12.sp,
+                            color = Slate400,
+                            lineHeight = 16.sp
+                        )
+                    }
+                }
+                Icon(
+                    imageVector = Icons.AutoMirrored.Filled.ArrowForward,
+                    contentDescription = "Open Preferences",
+                    tint = Cyan400,
+                    modifier = Modifier.size(20.dp)
+                )
+            }
+        }
+
         // Search Bar
         OutlinedTextField(
             value = searchQuery,
@@ -3442,65 +3636,14 @@ fun SettingsTabContent(
                     }
                 }
 
-                // 1. Accessibility Service
-                Surface(
-                    shape = RoundedCornerShape(14.dp),
-                    color = Slate950,
-                    border = BorderStroke(1.dp, Slate800),
-                    modifier = Modifier.fillMaxWidth()
-                ) {
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(12.dp),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Column(modifier = Modifier.weight(1f)) {
-                            Row(verticalAlignment = Alignment.CenterVertically) {
-                                Text(
-                                    text = "Accessibility Service",
-                                    style = MaterialTheme.typography.bodyMedium,
-                                    fontWeight = FontWeight.SemiBold,
-                                    color = Slate100
-                                )
-                                Spacer(modifier = Modifier.width(8.dp))
-                                Surface(
-                                    shape = RoundedCornerShape(6.dp),
-                                    color = if (isAccessibilityEnabled) EmeraldGlow else RoseGlow,
-                                    border = BorderStroke(1.dp, if (isAccessibilityEnabled) Emerald500.copy(alpha = 0.5f) else Rose500.copy(alpha = 0.5f))
-                                ) {
-                                    Text(
-                                        text = if (isAccessibilityEnabled) "ENABLED" else "DISABLED",
-                                        fontSize = 9.sp,
-                                        fontWeight = FontWeight.Bold,
-                                        color = if (isAccessibilityEnabled) Emerald400 else Rose400,
-                                        modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
-                                    )
-                                }
-                            }
-                            Spacer(modifier = Modifier.height(2.dp))
-                            Text(
-                                text = "Inspects screen & auto-accepts orders",
-                                fontSize = 11.sp,
-                                color = Slate400
-                            )
-                        }
-                        Spacer(modifier = Modifier.width(8.dp))
-                        Button(
-                            onClick = onOpenAccessibility,
-                            shape = RoundedCornerShape(10.dp),
-                            colors = ButtonDefaults.buttonColors(
-                                containerColor = if (isAccessibilityEnabled) Slate800 else Emerald500,
-                                contentColor = if (isAccessibilityEnabled) Slate300 else Color.White
-                            ),
-                            contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp),
-                            modifier = Modifier.testTag("accessibility_perm_button")
-                        ) {
-                            Text(if (isAccessibilityEnabled) "Settings" else "Enable", fontSize = 12.sp, fontWeight = FontWeight.Bold)
-                        }
-                    }
-                }
+                // 1. Accessibility Service (Dedicated in-app toggle without navigating to settings)
+                com.example.ui.AccessibilityServiceToggleRow(
+                    isServiceEnabled = isAccessibilityEnabled,
+                    onServiceStateChanged = { enabled ->
+                        onRefreshPermissions()
+                    },
+                    modifier = Modifier.testTag("settings_accessibility_toggle_row")
+                )
 
                 // 2. Notification Listener Service
                 Surface(
@@ -3682,6 +3825,66 @@ fun SettingsTabContent(
                     }
                 }
 
+                // 4. Auto-Start Permission
+                Surface(
+                    shape = RoundedCornerShape(14.dp),
+                    color = Slate950,
+                    border = BorderStroke(1.dp, Slate800),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(12.dp),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Column(modifier = Modifier.weight(1f)) {
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Text(
+                                    text = "Auto-Start Permission",
+                                    style = MaterialTheme.typography.bodyMedium,
+                                    fontWeight = FontWeight.SemiBold,
+                                    color = Slate100
+                                )
+                                Spacer(modifier = Modifier.width(8.dp))
+                                Surface(
+                                    shape = RoundedCornerShape(6.dp),
+                                    color = CyanGlow,
+                                    border = BorderStroke(1.dp, Cyan500.copy(alpha = 0.5f))
+                                ) {
+                                    Text(
+                                        text = "AUTO-START",
+                                        fontSize = 9.sp,
+                                        fontWeight = FontWeight.Bold,
+                                        color = Cyan400,
+                                        modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+                                    )
+                                }
+                            }
+                            Spacer(modifier = Modifier.height(2.dp))
+                            Text(
+                                text = "Allows app to restart automatically on device boot",
+                                fontSize = 11.sp,
+                                color = Slate400
+                            )
+                        }
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Button(
+                            onClick = { openAutoStartSettings(context) },
+                            shape = RoundedCornerShape(10.dp),
+                            colors = ButtonDefaults.buttonColors(
+                                containerColor = Cyan500,
+                                contentColor = Slate950
+                            ),
+                            contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp),
+                            modifier = Modifier.testTag("autostart_perm_button")
+                        ) {
+                            Text("Configure", fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                        }
+                    }
+                }
+
                 // Refresh Permissions Button
                 OutlinedButton(
                     onClick = onRefreshPermissions,
@@ -3702,6 +3905,18 @@ fun SettingsTabContent(
                 }
             }
         }
+
+        // =========================================================================
+        SettingsSectionHeader("ACCESSIBILITY TROUBLESHOOTING & FAQ")
+        // =========================================================================
+        com.example.ui.AccessibilityFaqSection(
+            onOpenAccessibility = onOpenAccessibility,
+            onOpenBatteryOptimization = onOpenBatteryOptimization,
+            onOpenOverlay = onOpenOverlay,
+            onOpenNotificationListener = onOpenNotificationListener,
+            initialSearchQuery = searchQuery,
+            modifier = Modifier.testTag("settings_accessibility_faq_section")
+        )
 
         // =========================================================================
         SettingsSectionHeader("CORE AUTOMATION")

@@ -33,6 +33,7 @@ import kotlin.math.hypot
  * 3. Toggles between Active Auto-Accept (Green) and Voice-Only Standby Radar (Red) on tap.
  * 4. Can be dragged smoothly to any position on the screen.
  */
+@SuppressLint("StaticFieldLeak")
 object StatusOverlayManager {
     private const val TAG = "StatusOverlayManager"
 

@@ -12,5 +12,9 @@ data class FilterSettings(
     val isDistanceFilterOn: Boolean = false,
     val isPriceFilterOn: Boolean = false,
     val isBlacklistFilterOn: Boolean = false,
-    val blacklistKeywords: String = ""
+    val blacklistKeywords: String = "",
+    val minPassengerRating: Float = 4.5f,
+    val isPassengerRatingFilterOn: Boolean = false,
+    val minPricePerKm: Float = 0f,
+    val isPricePerKmFilterOn: Boolean = false
 )

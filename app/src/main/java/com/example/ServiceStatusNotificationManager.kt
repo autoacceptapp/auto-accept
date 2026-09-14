@@ -41,7 +41,9 @@ object ServiceStatusNotificationManager {
     data class ServicesState(
         val isAccessibilityActive: Boolean = false,
         val isNotificationListenerActive: Boolean = false,
+        val isBatteryUnrestricted: Boolean = false,
         val isMasterSwitchOn: Boolean = true,
+        val hasMissingCriticalPermissions: Boolean = false,
         val lastUpdatedMillis: Long = System.currentTimeMillis()
     )
 
@@ -69,6 +71,26 @@ object ServiceStatusNotificationManager {
     }
 
     /**
+     * Checks whether Battery Optimization is ignored (Battery Unrestricted).
+     */
+    fun isBatteryUnrestricted(context: Context): Boolean {
+        return isBatteryOptimizationIgnored(context)
+    }
+
+    /**
+     * Returns true if ANY of the 3 critical permissions/services are missing or off:
+     * 1. Accessibility Service
+     * 2. Notification Listener Service
+     * 3. Battery Unrestricted (Ignoring Battery Optimizations)
+     */
+    fun hasMissingCriticalPermissions(context: Context): Boolean {
+        val acc = isAccessibilityActive(context)
+        val notif = isNotificationListenerActive(context)
+        val bat = isBatteryUnrestricted(context)
+        return !acc || !notif || !bat
+    }
+
+    /**
      * Creates or verifies the NotificationChannel for service status monitoring.
      */
     fun createNotificationChannel(context: Context) {
@@ -90,54 +112,68 @@ object ServiceStatusNotificationManager {
     }
 
     /**
-     * Builds the persistent status bar notification reflecting the current states.
+     * Builds the alert status bar notification reflecting missing permissions.
      */
     fun buildNotification(context: Context): Notification {
         createNotificationChannel(context)
 
         val accActive = isAccessibilityActive(context)
         val notifActive = isNotificationListenerActive(context)
+        val batActive = isBatteryUnrestricted(context)
         val masterOn = AutoAcceptService.isAutomationEnabled(context)
-        val delayMs = AutoAcceptService.getAcceptDelayMs(context)
+        val hasMissing = !accActive || !notifActive || !batActive
 
         _servicesState.value = ServicesState(
             isAccessibilityActive = accActive,
             isNotificationListenerActive = notifActive,
+            isBatteryUnrestricted = batActive,
             isMasterSwitchOn = masterOn,
+            hasMissingCriticalPermissions = hasMissing,
             lastUpdatedMillis = System.currentTimeMillis()
         )
 
-        // Title and summary based on aggregate health
+        // Title and summary based on missing requirements
         val title: String
         val colorInt: Int
-        if (accActive && notifActive) {
-            title = "RideStrike Monitor: Services Active 🟢"
-            colorInt = 0xFF10B981.toInt() // Emerald Green
-        } else if (accActive && !notifActive) {
-            title = "RideStrike: Notification Access Needed ⚠️"
-            colorInt = 0xFFF59E0B.toInt() // Amber
-        } else if (!accActive && notifActive) {
-            title = "RideStrike: Accessibility Service Inactive ⚠️"
-            colorInt = 0xFFF59E0B.toInt() // Amber
-        } else {
+        if (!accActive && !notifActive) {
             title = "RideStrike: Services Inactive 🔴"
             colorInt = 0xFFF43F5E.toInt() // Rose
+        } else if (!accActive) {
+            title = "RideStrike: Accessibility Inactive ⚠️"
+            colorInt = 0xFFF59E0B.toInt() // Amber
+        } else if (!notifActive) {
+            title = "RideStrike: Notification Access Needed ⚠️"
+            colorInt = 0xFFF59E0B.toInt() // Amber
+        } else if (!batActive) {
+            title = "RideStrike: Battery Restricted ⚠️"
+            colorInt = 0xFFF59E0B.toInt() // Amber
+        } else {
+            title = "RideStrike Monitor: Services Active 🟢"
+            colorInt = 0xFF10B981.toInt() // Emerald Green
         }
 
-        val accLabel = if (accActive) "Active" else "Inactive"
-        val notifLabel = if (notifActive) "Active" else "Inactive"
-        val shortContent = "Accessibility: $accLabel • Notification: $notifLabel"
+        val missingList = mutableListOf<String>()
+        if (!accActive) missingList.add("Accessibility")
+        if (!notifActive) missingList.add("Notification")
+        if (!batActive) missingList.add("Battery")
+
+        val shortContent = if (missingList.isNotEmpty()) {
+            "Missing: ${missingList.joinToString(", ")}"
+        } else {
+            "All services active and ready"
+        }
 
         // Expanded multi-line view
         val bigText = buildString {
-            append("• Accessibility Service: ").append(if (accActive) "Active (Scanning & Clicking)" else "Inactive (Needs Permission)")
-            append("\n• Notification Listener: ").append(if (notifActive) "Active (Detecting Orders)" else "Inactive (Needs Permission)")
-            append("\n• Master Auto-Accept: ").append(if (masterOn) "ON" else "OFF (Paused)")
-            append(" • Delay: ").append(delayMs).append("ms")
+            append("Critical permissions status:\n")
+            append("• Accessibility: ").append(if (accActive) "Active 🟢" else "DISABLED 🔴 (Required to accept rides)")
+            append("\n• Notification Access: ").append(if (notifActive) "Active 🟢" else "DISABLED 🔴 (Required to detect rides)")
+            append("\n• Battery Optimization: ").append(if (batActive) "Unrestricted 🟢" else "RESTRICTED ⚠️ (Service may be killed)")
         }
 
-        // Tap content -> Open MainActivity
+        // Tap content -> Open MainActivity on Settings Tab (Tab 4)
         val appIntent = Intent(context, MainActivity::class.java).apply {
+            putExtra("TARGET_TAB", 4)
             flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP
         }
         val appPendingIntent = PendingIntent.getActivity(
@@ -152,12 +188,13 @@ object ServiceStatusNotificationManager {
             .setContentTitle(title)
             .setContentText(shortContent)
             .setStyle(NotificationCompat.BigTextStyle().bigText(bigText))
-            .setOngoing(true)
+            .setOngoing(hasMissing)
+            .setAutoCancel(!hasMissing)
             .setOnlyAlertOnce(true)
             .setColor(colorInt)
             .setColorized(false)
             .setPriority(NotificationCompat.PRIORITY_LOW)
-            .setCategory(NotificationCompat.CATEGORY_SERVICE)
+            .setCategory(NotificationCompat.CATEGORY_STATUS)
             .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
             .setContentIntent(appPendingIntent)
 
@@ -192,27 +229,26 @@ object ServiceStatusNotificationManager {
             )
             builder.addAction(
                 android.R.drawable.ic_dialog_info,
-                "Enable Notification Access",
+                "Enable Notifications",
                 notifPendingIntent
             )
         }
 
-        // If both services are active, provide a direct shortcut to the Debug Logs tab
-        if (accActive && notifActive) {
-            val logsIntent = Intent(context, MainActivity::class.java).apply {
-                putExtra("TARGET_TAB", 3)
-                flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP
+        // Action 3: If Battery is restricted, provide unrestrict button
+        if (!batActive) {
+            val batIntent = Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS).apply {
+                flags = Intent.FLAG_ACTIVITY_NEW_TASK
             }
-            val logsPendingIntent = PendingIntent.getActivity(
+            val batPendingIntent = PendingIntent.getActivity(
                 context,
                 103,
-                logsIntent,
+                batIntent,
                 PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
             )
             builder.addAction(
-                android.R.drawable.ic_menu_info_details,
-                "View Logs",
-                logsPendingIntent
+                android.R.drawable.ic_dialog_alert,
+                "Unrestrict Battery",
+                batPendingIntent
             )
         }
 
@@ -220,12 +256,43 @@ object ServiceStatusNotificationManager {
     }
 
     /**
-     * Posts or updates the status bar notification.
-     * Can be invoked from MainActivity, BootReceiver, AutoAcceptService, or RideNotificationService.
+     * Posts, updates, or dismisses the status bar notification.
+     *
+     * Rule:
+     * - The persistent status notification should NOT stay visible if all required services are active.
+     * - Only show a notification if any critical permission is MISSING or OFF (Accessibility, Notification Listener, Battery Unrestricted).
+     * - Once all permissions are enabled, immediately dismiss/cancel this notification.
      */
     fun updateStatus(context: Context) {
         try {
-            // Guard for Android 13+ (API 33) POST_NOTIFICATIONS permission
+            val accActive = isAccessibilityActive(context)
+            val notifActive = isNotificationListenerActive(context)
+            val batActive = isBatteryUnrestricted(context)
+            val masterOn = AutoAcceptService.isAutomationEnabled(context)
+            val hasMissing = !accActive || !notifActive || !batActive
+
+            _servicesState.value = ServicesState(
+                isAccessibilityActive = accActive,
+                isNotificationListenerActive = notifActive,
+                isBatteryUnrestricted = batActive,
+                isMasterSwitchOn = masterOn,
+                hasMissingCriticalPermissions = hasMissing,
+                lastUpdatedMillis = System.currentTimeMillis()
+            )
+
+            val notificationManager = context.getSystemService(Context.NOTIFICATION_SERVICE) as? NotificationManager
+
+            // If all critical permissions are active, IMMEDIATELY dismiss/cancel notification
+            if (!hasMissing) {
+                NotificationManagerCompat.from(context).cancel(NOTIFICATION_ID)
+                notificationManager?.cancel(NOTIFICATION_ID)
+                // Stop KeepAliveService so it doesn't hold notification 1001
+                KeepAliveService.stop(context)
+                Log.d(TAG, "All critical permissions active. Service status notification cancelled/dismissed.")
+                return
+            }
+
+            // Only show notification if any critical permission is MISSING or OFF
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
                 if (ContextCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS)
                     != PackageManager.PERMISSION_GRANTED
@@ -237,19 +304,25 @@ object ServiceStatusNotificationManager {
 
             val notification = buildNotification(context)
             NotificationManagerCompat.from(context).notify(NOTIFICATION_ID, notification)
-            Log.d(TAG, "Service status notification updated.")
+            Log.d(TAG, "Service status alert notification updated: missing permissions detected.")
         } catch (e: Exception) {
             Log.w(TAG, "Failed to update service status notification: ${e.message}")
         }
     }
 
     /**
-     * Starts or updates foreground service using the unified status notification.
+     * Starts or updates foreground service using the status notification only if missing permissions exist.
      */
     fun startOrUpdateForeground(service: AutoAcceptService) {
         try {
+            if (!hasMissingCriticalPermissions(service)) {
+                NotificationManagerCompat.from(service).cancel(NOTIFICATION_ID)
+                val nm = service.getSystemService(Context.NOTIFICATION_SERVICE) as? NotificationManager
+                nm?.cancel(NOTIFICATION_ID)
+                return
+            }
             val notification = buildNotification(service)
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
                 try {
                     service.startForeground(
                         NOTIFICATION_ID,
@@ -262,7 +335,7 @@ object ServiceStatusNotificationManager {
             } else {
                 service.startForeground(NOTIFICATION_ID, notification)
             }
-            Log.i(TAG, "AutoAcceptService foreground status notification started successfully.")
+            Log.i(TAG, "AutoAcceptService foreground status alert notification started successfully.")
         } catch (e: Exception) {
             Log.e(TAG, "Failed to start foreground status notification: ${e.message}", e)
         }

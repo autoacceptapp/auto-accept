@@ -41,6 +41,8 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Surface
+import androidx.compose.material3.Switch
+import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
@@ -112,9 +114,21 @@ fun ServiceStatusDashboardWidget(
     var isNotifSettingsEnabled by remember {
         mutableStateOf(isNotificationListenerEnabled(context))
     }
+    var showAdbDialog by remember { mutableStateOf(false) }
 
     val isAccessibilityActive = isAccServiceRunning || isAccSettingsEnabled
     val isNotificationListenerActive = isNotifListenerConnected || isNotifSettingsEnabled
+
+    if (showAdbDialog) {
+        DirectAccessibilitySetupDialog(
+            context = context,
+            onDismiss = { showAdbDialog = false },
+            onOpenSettings = {
+                openAccessibilitySettings(context)
+                Toast.makeText(context, "Find 'Auto Accept' and toggle ON", Toast.LENGTH_LONG).show()
+            }
+        )
+    }
 
     fun refreshStates() {
         isAccSettingsEnabled = isAccessibilityServiceEnabled(context, AutoAcceptService::class.java)
@@ -354,31 +368,56 @@ fun ServiceStatusDashboardWidget(
 
                     Spacer(modifier = Modifier.width(8.dp))
 
-                    // Quick-link button to toggle in settings
-                    Button(
-                        onClick = {
-                            openAccessibilitySettings(context)
-                            Toast.makeText(context, "Find 'Auto Accept' and toggle ON", Toast.LENGTH_LONG).show()
-                        },
-                        shape = RoundedCornerShape(8.dp),
-                        colors = ButtonDefaults.buttonColors(
-                            containerColor = if (isAccessibilityActive) Slate800 else Rose500,
-                            contentColor = if (isAccessibilityActive) Cyan400 else Slate50
-                        ),
-                        contentPadding = PaddingValues(horizontal = 10.dp, vertical = 6.dp),
-                        modifier = Modifier.testTag("btn_accessibility_settings")
-                    ) {
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            Text(
-                                text = if (isAccessibilityActive) "Settings" else "Toggle ON",
-                                fontSize = 11.sp,
-                                fontWeight = FontWeight.Bold
-                            )
-                            Spacer(modifier = Modifier.width(4.dp))
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        // Dedicated in-app switch for Accessibility Service
+                        Switch(
+                            checked = isAccessibilityActive,
+                            onCheckedChange = { targetState ->
+                                if (!targetState) {
+                                    val stopped = disableAccessibilityServiceDirectly(context)
+                                    refreshStates()
+                                    Toast.makeText(
+                                        context,
+                                        if (stopped) "Accessibility Service stopped directly"
+                                        else "Accessibility stopped",
+                                        Toast.LENGTH_SHORT
+                                    ).show()
+                                } else {
+                                    val enabled = enableAccessibilityServiceDirectly(context)
+                                    if (enabled) {
+                                        refreshStates()
+                                        Toast.makeText(context, "Accessibility Service enabled directly!", Toast.LENGTH_SHORT).show()
+                                    } else {
+                                        showAdbDialog = true
+                                    }
+                                }
+                            },
+                            colors = SwitchDefaults.colors(
+                                checkedThumbColor = Color.White,
+                                checkedTrackColor = Emerald500,
+                                uncheckedThumbColor = Slate400,
+                                uncheckedTrackColor = Slate800
+                            ),
+                            modifier = Modifier.testTag("widget_accessibility_toggle_switch")
+                        )
+
+                        Spacer(modifier = Modifier.width(4.dp))
+
+                        // Quick-link button to toggle in settings if desired
+                        IconButton(
+                            onClick = {
+                                openAccessibilitySettings(context)
+                                Toast.makeText(context, "Find 'Auto Accept' and toggle ON", Toast.LENGTH_LONG).show()
+                            },
+                            modifier = Modifier
+                                .size(36.dp)
+                                .testTag("btn_accessibility_settings")
+                        ) {
                             Icon(
                                 imageVector = Icons.AutoMirrored.Filled.OpenInNew,
                                 contentDescription = "Open Settings",
-                                modifier = Modifier.size(12.dp)
+                                tint = Slate400,
+                                modifier = Modifier.size(16.dp)
                             )
                         }
                     }

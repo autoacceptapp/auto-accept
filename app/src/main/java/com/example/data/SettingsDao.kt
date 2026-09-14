@@ -4,6 +4,7 @@ import androidx.room.Dao
 import androidx.room.Insert
 import androidx.room.OnConflictStrategy
 import androidx.room.Query
+import androidx.room.Update
 import kotlinx.coroutines.flow.Flow
 
 @Dao
@@ -60,4 +61,32 @@ interface SettingsDao {
 
     @Query("DELETE FROM trip_history")
     fun clearTripHistorySync()
+
+    // --- CustomFilterRule ---
+    @Query("SELECT * FROM custom_filter_rules ORDER BY createdAt DESC")
+    fun getAllCustomRules(): Flow<List<CustomFilterRule>>
+
+    @Query("SELECT * FROM custom_filter_rules ORDER BY createdAt DESC")
+    fun getAllCustomRulesSync(): List<CustomFilterRule>
+
+    @Query("SELECT * FROM custom_filter_rules WHERE isActive = 1 ORDER BY createdAt DESC")
+    fun getActiveCustomRules(): Flow<List<CustomFilterRule>>
+
+    @Query("SELECT * FROM custom_filter_rules WHERE isActive = 1 ORDER BY createdAt DESC")
+    fun getActiveCustomRulesSync(): List<CustomFilterRule>
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun insertCustomRule(rule: CustomFilterRule): Long
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    fun insertCustomRuleSync(rule: CustomFilterRule): Long
+
+    @Update
+    suspend fun updateCustomRule(rule: CustomFilterRule)
+
+    @Query("DELETE FROM custom_filter_rules WHERE id = :id")
+    suspend fun deleteCustomRule(id: Long)
+
+    @Query("UPDATE custom_filter_rules SET isActive = :isActive WHERE id = :id")
+    suspend fun toggleCustomRule(id: Long, isActive: Boolean)
 }

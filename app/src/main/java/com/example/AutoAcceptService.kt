@@ -288,6 +288,9 @@ class AutoAcceptService : AccessibilityService(), TextToSpeech.OnInitListener {
         const val KEY_MIN_PRICE = "key_min_price"
         const val KEY_MAX_PRICE = "key_max_price"
 
+        const val KEY_RATING_FILTER_ENABLED = "key_rating_filter_enabled"
+        const val KEY_MIN_PASSENGER_RATING = "key_min_passenger_rating"
+
         const val KEY_BLACKLIST_ENABLED = "key_blacklist_enabled"
         const val KEY_BLACKLIST_KEYWORDS = "key_blacklist_keywords"
 
@@ -305,9 +308,14 @@ class AutoAcceptService : AccessibilityService(), TextToSpeech.OnInitListener {
         const val DEFAULT_MAX_DISTANCE_KM = 5.0f
         const val DEFAULT_MIN_PRICE = 40.0f
         const val DEFAULT_MAX_PRICE = 500.0f
+        const val DEFAULT_MIN_PASSENGER_RATING = 4.5f
         const val DEFAULT_USER_NAME = "Captain"
         const val DEFAULT_TTS_LANGUAGE = "en"
         const val DEFAULT_BLACKLIST_KEYWORDS = "Airport, Toll, Slum, Waterlog"
+
+        // Success Streak Gamification Keys
+        const val KEY_SUCCESS_STREAK = "key_success_streak"
+        const val KEY_BEST_SUCCESS_STREAK = "key_best_success_streak"
 
         // Rate-limiting debounce cooldown (3000ms)
         private const val CLICK_COOLDOWN_MS = 3000L
@@ -322,6 +330,13 @@ class AutoAcceptService : AccessibilityService(), TextToSpeech.OnInitListener {
         // List of Pair<DateString, Count>
         private val _tripHistory = MutableStateFlow<List<Pair<String, Int>>>(emptyList())
         val tripHistory: StateFlow<List<Pair<String, Int>>> = _tripHistory.asStateFlow()
+
+        // Gamified Success Streak StateFlows (consecutive accepted rides without any missed rides)
+        private val _successStreak = MutableStateFlow(0)
+        val successStreak: StateFlow<Int> = _successStreak.asStateFlow()
+
+        private val _bestSuccessStreak = MutableStateFlow(0)
+        val bestSuccessStreak: StateFlow<Int> = _bestSuccessStreak.asStateFlow()
 
 
 
@@ -467,6 +482,13 @@ class AutoAcceptService : AccessibilityService(), TextToSpeech.OnInitListener {
                 category = logCat,
                 rawDetails = details.ifBlank { null }
             )
+
+            // Success streak tracking: consecutive accepted rides increment streak; missed/ignored rides reset streak
+            if (type == ServiceEventType.ORDER_ACCEPTED) {
+                recordAcceptedStreak(instance)
+            } else if (type == ServiceEventType.ORDER_IGNORED) {
+                resetSuccessStreak(instance)
+            }
         }
 
         fun clearServiceEvents() {
@@ -492,16 +514,57 @@ class AutoAcceptService : AccessibilityService(), TextToSpeech.OnInitListener {
                 badge = "DETECTED"
             )
 
-            logServiceEvent(
-                type = ServiceEventType.ORDER_ACCEPTED,
-                title = "Order accepted",
-                description = "High-speed auto-click executed for ₹$fare ($dist km)",
-                details = "Turbo Engine (190ms response delay)",
-                badge = "ACCEPTED"
-            )
+            val isMissed = (_serviceEvents.value.size % 2 == 1)
+            if (isMissed) {
+                logServiceEvent(
+                    type = ServiceEventType.ORDER_IGNORED,
+                    title = "Ride missed / filtered",
+                    description = "Skipped: ₹$fare below threshold or outside zone ($dist km)",
+                    details = "Filter condition matched: Ride missed",
+                    badge = "MISSED"
+                )
+            } else {
+                logServiceEvent(
+                    type = ServiceEventType.ORDER_ACCEPTED,
+                    title = "Order accepted",
+                    description = "High-speed auto-click executed for ₹$fare ($dist km)",
+                    details = "Turbo Engine (190ms response delay)",
+                    badge = "ACCEPTED"
+                )
+            }
         }
 
         private var instance: AutoAcceptService? = null
+
+        /**
+         * Programmatically disables the running AccessibilityService without navigating to system settings.
+         * Uses Android 7.0+ AccessibilityService.disableSelf().
+         */
+        fun disableService(): Boolean {
+            val service = instance
+            if (service != null) {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+                    try {
+                        service.disableSelf()
+                        instance = null
+                        _isServiceRunning.value = false
+                        _recentLog.value = "Service disabled directly via in-app toggle."
+                        Log.i(TAG, "AccessibilityService stopped itself via disableSelf().")
+                        return true
+                    } catch (e: Exception) {
+                        Log.e(TAG, "Failed to disableSelf: ${e.message}", e)
+                    }
+                }
+            }
+            return false
+        }
+
+        /**
+         * Returns whether the active AccessibilityService instance is currently bound and running.
+         */
+        fun isServiceConnected(): Boolean {
+            return instance != null && _isServiceRunning.value
+        }
 
         /**
          * Acquires a CPU WakeLock on the active service instance or context
@@ -639,7 +702,7 @@ class AutoAcceptService : AccessibilityService(), TextToSpeech.OnInitListener {
          * Prevents false positives by strictly verifying button text against negative words and valid patterns.
          * Resiliently matches roots like Accept, Swipe, Take, Confirm, and Go.
          */
-        fun isValidAcceptText(context: Context, text: String, keyword: String = ""): Boolean {
+        fun isValidAcceptText(context: Context? = null, text: String, keyword: String = ""): Boolean {
             if (text.isBlank() || text.length > 35) return false
             val lower = text.lowercase()
             val falsePositiveWords = listOf("do not", "don't", "terms", "policy", "cash", "upi", "card", "condition", "decline", "reject", "cancel", "privacy", "return")
@@ -650,7 +713,7 @@ class AutoAcceptService : AccessibilityService(), TextToSpeech.OnInitListener {
                 if (text.startsWith(keyword, ignoreCase = true)) return true
             }
 
-            val enabledKeywords = getEnabledKeywords(context)
+            val enabledKeywords = if (context != null) getEnabledKeywords(context) else emptyList()
             if (enabledKeywords.any { text.equals(it, ignoreCase = true) || text.startsWith(it, ignoreCase = true) }) {
                 return true
             }
@@ -679,7 +742,9 @@ class AutoAcceptService : AccessibilityService(), TextToSpeech.OnInitListener {
                             isDistanceFilterOn = isDistanceFilterEnabled(context),
                             isPriceFilterOn = isPriceFilterEnabled(context),
                             isBlacklistFilterOn = isBlacklistEnabled(context),
-                            blacklistKeywords = getBlacklistKeywords(context)
+                            blacklistKeywords = getBlacklistKeywords(context),
+                            minPassengerRating = getMinPassengerRating(context),
+                            isPassengerRatingFilterOn = isPassengerRatingFilterEnabled(context)
                         )
                     )
                 } catch (e: Exception) {
@@ -788,6 +853,71 @@ class AutoAcceptService : AccessibilityService(), TextToSpeech.OnInitListener {
                 .apply()
             _dailyTripCount.value = currentCount + 1
 
+        }
+
+        // =========================================================================
+        // SUCCESS STREAK GAMIFICATION METHODS
+        // =========================================================================
+
+        fun getSuccessStreak(context: Context? = null): Int {
+            if (context == null) return _successStreak.value
+            return try {
+                context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE).getInt(KEY_SUCCESS_STREAK, _successStreak.value)
+            } catch (_: Throwable) {
+                _successStreak.value
+            }
+        }
+
+        fun getBestSuccessStreak(context: Context? = null): Int {
+            if (context == null) return _bestSuccessStreak.value
+            return try {
+                context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE).getInt(KEY_BEST_SUCCESS_STREAK, _bestSuccessStreak.value)
+            } catch (_: Throwable) {
+                _bestSuccessStreak.value
+            }
+        }
+
+        fun syncSuccessStreak(context: Context) {
+            try {
+                val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+                val current = prefs.getInt(KEY_SUCCESS_STREAK, 0)
+                val best = prefs.getInt(KEY_BEST_SUCCESS_STREAK, 0)
+                _successStreak.value = current
+                _bestSuccessStreak.value = maxOf(best, current)
+            } catch (_: Throwable) {
+            }
+        }
+
+        fun recordAcceptedStreak(context: Context? = null) {
+            val next = _successStreak.value + 1
+            _successStreak.value = next
+            val newBest = maxOf(_bestSuccessStreak.value, next)
+            _bestSuccessStreak.value = newBest
+            val ctx = context ?: instance
+            if (ctx != null) {
+                try {
+                    val prefs = ctx.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+                    prefs.edit()
+                        .putInt(KEY_SUCCESS_STREAK, next)
+                        .putInt(KEY_BEST_SUCCESS_STREAK, newBest)
+                        .apply()
+                } catch (e: Throwable) {
+                    // Ignored in test environment
+                }
+            }
+        }
+
+        fun resetSuccessStreak(context: Context? = null) {
+            _successStreak.value = 0
+            val ctx = context ?: instance
+            if (ctx != null) {
+                try {
+                    val prefs = ctx.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+                    prefs.edit().putInt(KEY_SUCCESS_STREAK, 0).apply()
+                } catch (e: Throwable) {
+                    // Ignored in test environment
+                }
+            }
         }
 
         // =========================================================================
@@ -939,6 +1069,29 @@ class AutoAcceptService : AccessibilityService(), TextToSpeech.OnInitListener {
         fun setMaxPrice(context: Context, maxPrice: Float) {
             val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
             prefs.edit().putFloat(KEY_MAX_PRICE, maxPrice).apply()
+        }
+
+        // Passenger Rating Filter Toggle & Threshold
+        fun isPassengerRatingFilterEnabled(context: Context): Boolean {
+            val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            return prefs.getBoolean(KEY_RATING_FILTER_ENABLED, false)
+        }
+
+        fun setPassengerRatingFilterEnabled(context: Context, enabled: Boolean) {
+            val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            prefs.edit().putBoolean(KEY_RATING_FILTER_ENABLED, enabled).apply()
+            syncSettingsToRoom(context)
+        }
+
+        fun getMinPassengerRating(context: Context): Float {
+            val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            return prefs.getFloat(KEY_MIN_PASSENGER_RATING, DEFAULT_MIN_PASSENGER_RATING)
+        }
+
+        fun setMinPassengerRating(context: Context, rating: Float) {
+            val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            prefs.edit().putFloat(KEY_MIN_PASSENGER_RATING, rating).apply()
+            syncSettingsToRoom(context)
         }
 
         // Blacklist Filter Toggle & Keywords
@@ -1228,6 +1381,25 @@ fun getCustomSoundUri(context: Context): String? {
                     val str2 = match.groupValues.getOrNull(2)?.takeIf { it.isNotEmpty() }
                     val price = (str1 ?: str2)?.toFloatOrNull()
                     if (price != null) return price
+                }
+            }
+            return null
+        }
+
+        fun extractPassengerRating(texts: List<String>): Float? {
+            val starRegex = Regex("""(?:★|⭐)\s*([1-5](?:\.\d{1,2})?)|([1-5](?:\.\d{1,2})?)\s*(?:★|⭐)""")
+            val ratingWordRegex = Regex("""(?:rating|rated)\s*[:\-]?\s*([1-5](?:\.\d{1,2})?)|([1-5](?:\.\d{1,2})?)\s*(?:rating|rated)""", RegexOption.IGNORE_CASE)
+
+            for (text in texts) {
+                starRegex.find(text)?.let { m ->
+                    val str = m.groupValues[1].ifEmpty { m.groupValues[2] }
+                    val rating = str.toFloatOrNull()
+                    if (rating != null && rating in 1.0f..5.0f) return rating
+                }
+                ratingWordRegex.find(text)?.let { m ->
+                    val str = m.groupValues[1].ifEmpty { m.groupValues[2] }
+                    val rating = str.toFloatOrNull()
+                    if (rating != null && rating in 1.0f..5.0f) return rating
                 }
             }
             return null
@@ -1781,7 +1953,7 @@ fun getCustomSoundUri(context: Context): String? {
             createNotificationChannels(this)
             val notification = buildForegroundNotification(this)
 
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
                 try {
                     startForeground(
                         NOTIFICATION_ID,
@@ -1977,11 +2149,13 @@ fun getCustomSoundUri(context: Context): String? {
 
             val parsedDistance = extractDistance(cardTexts)
             val parsedPrice = extractPrice(cardTexts)
+            val parsedRating = extractPassengerRating(cardTexts)
             val parsedPickup = extractPickupLocation(cardTexts) ?: "Nearby Pickup"
             val parsedDrop = extractDropLocation(cardTexts) ?: "Destination Drop"
 
             val fareInfo = parsedPrice?.let { "₹${it.toInt()}" } ?: "Fare ~"
             val distInfo = parsedDistance?.let { "${it} km" } ?: "Dist ~"
+            val ratingInfo = parsedRating?.let { "★ $it" } ?: "★ ~"
 
             val rideSignature = generateRideSignature(sourcePackage, parsedPrice, parsedDistance, parsedPickup, parsedDrop)
 
@@ -2021,7 +2195,8 @@ fun getCustomSoundUri(context: Context): String? {
                 val isBlacklistFilterOn = isBlacklistEnabled(this)
                 val isDistanceFilterOn = isDistanceFilterEnabled(this)
                 val isPriceFilterOn = isPriceFilterEnabled(this)
-                val areAllFiltersOff = !isBlacklistFilterOn && !isDistanceFilterOn && !isPriceFilterOn
+                val isRatingFilterOn = isPassengerRatingFilterEnabled(this)
+                val areAllFiltersOff = !isBlacklistFilterOn && !isDistanceFilterOn && !isPriceFilterOn && !isRatingFilterOn
 
                 if (areAllFiltersOff) {
                     Log.d(TAG, "Accept All Override active: All individual filters OFF -> accepting without parameter checks.")
@@ -2098,6 +2273,71 @@ fun getCustomSoundUri(context: Context): String? {
                                 logRideLocally(this, parsedPrice, parsedDistance ?: 0f, parsedPickup, parsedDrop, "IGNORED", "Price above maximum (₹${parsedPrice.toInt()} > ₹${maxPrice.toInt()})", sourcePackage)
                                 filterFailed = true
                             }
+                        }
+                    }
+
+                    if (!filterFailed && isRatingFilterOn) {
+                        val minRating = getMinPassengerRating(this)
+                        if (parsedRating != null && parsedRating < minRating) {
+                            val logMsg = "Order REJECTED: Passenger rating ${parsedRating}★ < Min ${minRating}★"
+                            Log.i(TAG, logMsg)
+                            _recentLog.value = logMsg
+                            logServiceEvent(
+                                type = ServiceEventType.ORDER_IGNORED,
+                                title = "Order rejected (Rating Low)",
+                                description = "Passenger rating ${parsedRating}★ < Min ${minRating}★",
+                                details = "Pickup: $parsedPickup",
+                                badge = "REJECTED"
+                            )
+                            logRideLocally(this, parsedPrice ?: 0f, parsedDistance ?: 0f, parsedPickup, parsedDrop, "IGNORED", "Passenger rating below threshold (${parsedRating}★ < ${minRating}★)", sourcePackage)
+                            filterFailed = true
+                        }
+                    }
+
+                    // Room Database: Custom Filtering Rules evaluation
+                    if (!filterFailed) {
+                        try {
+                            val db = com.example.data.AppDatabase.getDatabase(this)
+                            val activeRules = db.settingsDao().getActiveCustomRulesSync()
+                            if (activeRules.isNotEmpty()) {
+                                var matchedAny = false
+                                for (rule in activeRules) {
+                                    var violates = false
+                                    if (rule.isMinFareEnabled && parsedPrice != null && parsedPrice < rule.minFare) {
+                                        violates = true
+                                    }
+                                    if (rule.isMaxDistanceEnabled && parsedDistance != null && parsedDistance > rule.maxDistanceKm) {
+                                        violates = true
+                                    }
+                                    if (rule.isRatingFilterEnabled && parsedRating != null && parsedRating < rule.minPassengerRating) {
+                                        violates = true
+                                    }
+                                    if (rule.destinationKeyword.isNotBlank()) {
+                                        val matchesWord = cardTexts.any { it.contains(rule.destinationKeyword, ignoreCase = true) }
+                                        if (!matchesWord) violates = true
+                                    }
+                                    if (!violates) {
+                                        matchedAny = true
+                                        break
+                                    }
+                                }
+                                if (!matchedAny) {
+                                    val logMsg = "Order REJECTED: Did not match active custom rules in Room DB"
+                                    Log.i(TAG, logMsg)
+                                    _recentLog.value = logMsg
+                                    logServiceEvent(
+                                        type = ServiceEventType.ORDER_IGNORED,
+                                        title = "Order rejected (Custom Rule)",
+                                        description = "Did not meet criteria of active custom filtering rules",
+                                        details = "Fare: $fareInfo • Dist: $distInfo",
+                                        badge = "REJECTED"
+                                    )
+                                    logRideLocally(this, parsedPrice ?: 0f, parsedDistance ?: 0f, parsedPickup, parsedDrop, "IGNORED", "Filtered out by custom Room rules", sourcePackage)
+                                    filterFailed = true
+                                }
+                            }
+                        } catch (e: Exception) {
+                            Log.w(TAG, "Room custom rule check note: ${e.message}")
                         }
                     }
 

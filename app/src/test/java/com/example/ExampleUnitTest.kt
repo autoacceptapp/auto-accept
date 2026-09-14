@@ -186,28 +186,28 @@ class ExampleUnitTest {
   @Test
   fun testAcceptButtonValidation_FalsePositivePrevention() {
     // Valid accept texts
-    assertTrue(AutoAcceptService.isValidAcceptText("Accept", "Accept"))
-    assertTrue(AutoAcceptService.isValidAcceptText("ACCEPT", "Accept"))
-    assertTrue(AutoAcceptService.isValidAcceptText("Accept Order", "Accept"))
-    assertTrue(AutoAcceptService.isValidAcceptText("Accept Ride", "Accept"))
-    assertTrue(AutoAcceptService.isValidAcceptText("Swipe to Accept", "Swipe to Accept"))
-    assertTrue(AutoAcceptService.isValidAcceptText("Take Order", "Take Order"))
-    assertTrue(AutoAcceptService.isValidAcceptText("Confirm Order", "Confirm Order"))
-    assertTrue(AutoAcceptService.isValidAcceptText("Go"))
-    assertTrue(AutoAcceptService.isValidAcceptText("Chalo"))
-    assertTrue(AutoAcceptService.isValidAcceptText("Shuru"))
-    assertTrue(AutoAcceptService.isValidAcceptText("Yes"))
+    assertTrue(AutoAcceptService.isValidAcceptText(text = "Accept", keyword = "Accept"))
+    assertTrue(AutoAcceptService.isValidAcceptText(text = "ACCEPT", keyword = "Accept"))
+    assertTrue(AutoAcceptService.isValidAcceptText(text = "Accept Order", keyword = "Accept"))
+    assertTrue(AutoAcceptService.isValidAcceptText(text = "Accept Ride", keyword = "Accept"))
+    assertTrue(AutoAcceptService.isValidAcceptText(text = "Swipe to Accept", keyword = "Swipe to Accept"))
+    assertTrue(AutoAcceptService.isValidAcceptText(text = "Take Order", keyword = "Take Order"))
+    assertTrue(AutoAcceptService.isValidAcceptText(text = "Confirm Order", keyword = "Confirm Order"))
+    assertTrue(AutoAcceptService.isValidAcceptText(text = "Go"))
+    assertTrue(AutoAcceptService.isValidAcceptText(text = "Chalo"))
+    assertTrue(AutoAcceptService.isValidAcceptText(text = "Shuru"))
+    assertTrue(AutoAcceptService.isValidAcceptText(text = "Yes"))
 
     // False positives that MUST be rejected
-    assertFalse(AutoAcceptService.isValidAcceptText("Accept terms and conditions", "Accept"))
-    assertFalse(AutoAcceptService.isValidAcceptText("We do not accept cash payments", "Accept"))
-    assertFalse(AutoAcceptService.isValidAcceptText("Please accept privacy policy", "Accept"))
-    assertFalse(AutoAcceptService.isValidAcceptText("Accept UPI only", "Accept"))
-    assertFalse(AutoAcceptService.isValidAcceptText("Decline or cancel", "Accept"))
-    assertFalse(AutoAcceptService.isValidAcceptText("Terms & conditions apply for acceptance", "Accept"))
-    assertFalse(AutoAcceptService.isValidAcceptText("", "Accept"))
-    assertFalse(AutoAcceptService.isValidAcceptText("   ", "Accept"))
-    assertFalse(AutoAcceptService.isValidAcceptText("A very very long paragraph containing the word accept inside it somewhere that is not a button", "Accept"))
+    assertFalse(AutoAcceptService.isValidAcceptText(text = "Accept terms and conditions", keyword = "Accept"))
+    assertFalse(AutoAcceptService.isValidAcceptText(text = "We do not accept cash payments", keyword = "Accept"))
+    assertFalse(AutoAcceptService.isValidAcceptText(text = "Please accept privacy policy", keyword = "Accept"))
+    assertFalse(AutoAcceptService.isValidAcceptText(text = "Accept UPI only", keyword = "Accept"))
+    assertFalse(AutoAcceptService.isValidAcceptText(text = "Decline or cancel", keyword = "Accept"))
+    assertFalse(AutoAcceptService.isValidAcceptText(text = "Terms & conditions apply for acceptance", keyword = "Accept"))
+    assertFalse(AutoAcceptService.isValidAcceptText(text = "", keyword = "Accept"))
+    assertFalse(AutoAcceptService.isValidAcceptText(text = "   ", keyword = "Accept"))
+    assertFalse(AutoAcceptService.isValidAcceptText(text = "A very very long paragraph containing the word accept inside it somewhere that is not a button", keyword = "Accept"))
   }
 
   @Test
@@ -224,7 +224,6 @@ class ExampleUnitTest {
         distanceKm = 2.1f,
         pickup = "Indiranagar, 100ft Road",
         drop = "MG Road, Metro Station",
-        isMissedOrder = true,
         missedReason = "Fare ₹45 below threshold",
         suggestedFix = "Adjust Min Price setting in Home tab"
       )
@@ -277,5 +276,82 @@ class ExampleUnitTest {
     // Ensure safe no-op release does not throw
     AutoAcceptService.releaseCpuWakeLock("Test clean release")
     assertFalse(AutoAcceptService.isCpuWakeLockHeld())
+  }
+
+  @Test
+  fun testSuccessStreakTracking() {
+    AutoAcceptService.resetSuccessStreak()
+    assertEquals(0, AutoAcceptService.successStreak.value)
+
+    // Consecutive accepted rides build the streak
+    AutoAcceptService.recordAcceptedStreak()
+    assertEquals(1, AutoAcceptService.successStreak.value)
+    assertEquals(1, AutoAcceptService.bestSuccessStreak.value)
+
+    AutoAcceptService.recordAcceptedStreak()
+    assertEquals(2, AutoAcceptService.successStreak.value)
+    assertEquals(2, AutoAcceptService.bestSuccessStreak.value)
+
+    AutoAcceptService.recordAcceptedStreak()
+    assertEquals(3, AutoAcceptService.successStreak.value)
+    assertEquals(3, AutoAcceptService.bestSuccessStreak.value)
+
+    // A missed ride resets current streak to 0, while best streak is preserved
+    AutoAcceptService.resetSuccessStreak()
+    assertEquals(0, AutoAcceptService.successStreak.value)
+    assertEquals(3, AutoAcceptService.bestSuccessStreak.value)
+
+    // A new accepted ride starts streak at 1, best streak remains 3
+    AutoAcceptService.recordAcceptedStreak()
+    assertEquals(1, AutoAcceptService.successStreak.value)
+    assertEquals(3, AutoAcceptService.bestSuccessStreak.value)
+
+    // Test automatic streak tracking via logServiceEvent
+    AutoAcceptService.logServiceEvent(
+      type = ServiceEventType.ORDER_ACCEPTED,
+      title = "Order accepted",
+      description = "Fast accept"
+    )
+    assertEquals(2, AutoAcceptService.successStreak.value)
+
+    AutoAcceptService.logServiceEvent(
+      type = ServiceEventType.ORDER_IGNORED,
+      title = "Ride missed / filtered",
+      description = "Missed ride"
+    )
+    assertEquals(0, AutoAcceptService.successStreak.value)
+    assertEquals(3, AutoAcceptService.bestSuccessStreak.value)
+  }
+
+  @Test
+  fun testHeatmapHourlyDemandCalculations() {
+    val now = System.currentTimeMillis()
+    val sampleRideLogs = listOf(
+      RideLogItem(id = "1", price = 120f, createdMillis = now),
+      RideLogItem(id = "2", price = 180f, createdMillis = now),
+      RideLogItem(id = "3", price = 250f, createdMillis = now - 24 * 60 * 60 * 1000L) // Yesterday
+    )
+
+    // Verify hourly matrix distribution
+    val matrix = Array(7) { IntArray(24) }
+    val cal = java.util.Calendar.getInstance()
+    val dayMillis = 24 * 60 * 60 * 1000L
+
+    for (log in sampleRideLogs) {
+      val diffDays = ((now - log.createdMillis) / dayMillis).toInt()
+      if (diffDays in 0..6) {
+        val dayIdx = 6 - diffDays
+        cal.timeInMillis = log.createdMillis
+        val hour = cal.get(java.util.Calendar.HOUR_OF_DAY).coerceIn(0, 23)
+        matrix[dayIdx][hour]++
+      }
+    }
+
+    // Today (dayIndex 6) should have 2 rides
+    cal.timeInMillis = now
+    val currentHour = cal.get(java.util.Calendar.HOUR_OF_DAY)
+    assertEquals(2, matrix[6][currentHour])
+    // Yesterday (dayIndex 5) should have 1 ride
+    assertEquals(1, matrix[5][currentHour])
   }
 }

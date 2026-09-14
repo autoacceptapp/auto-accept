@@ -104,7 +104,11 @@ object DebugLogManager {
         val current = _logs.value
         val updated = (listOf(entry) + current).take(MAX_LOGS)
         _logs.value = updated
-        Log.d(TAG, "[${entry.serviceOrigin.name}][${entry.severity.name}] ${entry.title}: ${entry.message}")
+        try {
+            Log.d(TAG, "[${entry.serviceOrigin.name}][${entry.severity.name}] ${entry.title}: ${entry.message}")
+        } catch (_: Throwable) {
+            // Safe fallback in JVM test environment without android.util.Log mocked
+        }
     }
 
     /**
