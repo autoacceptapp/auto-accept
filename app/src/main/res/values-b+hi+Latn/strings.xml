@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Auto Accept</string>
+    <string name="accessibility_service_description">Aane wale ride orders monitor karta hai aur criteria match hone par auto-accept karta hai.</string>
+
+    <!-- Dashboard Navigation Tabs -->
+    <string name="tab_radar">Radar</string>
+    <string name="tab_profile">Profile</string>
+    <string name="tab_history">History</string>
+    <string name="tab_logs">Logs</string>
+    <string name="tab_settings">Settings</string>
+
+    <!-- Overlay & Status Indicators -->
+    <string name="status_voice_only">Standby: Sirf Voice Announcer</string>
+    <string name="status_auto_accept_on">Active: Auto-Accept ON</string>
+    <string name="master_switch_title">Master Auto-Accept</string>
+    <string name="search_settings_hint">Settings aur keywords search karein...</string>
+</resources>

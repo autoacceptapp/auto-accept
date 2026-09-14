@@ -119,6 +119,7 @@ import androidx.compose.material3.TabRowDefaults
 import androidx.compose.material3.TabRowDefaults.tabIndicatorOffset
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
+import androidx.compose.ui.res.stringResource
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
@@ -228,6 +229,10 @@ const val KEY_PENDING_PLAN_DAYS = "KEY_PENDING_PLAN_DAYS"
 const val KEY_PENDING_PLAN_PRICE = "KEY_PENDING_PLAN_PRICE"
 
 class MainActivity : ComponentActivity(), TextToSpeech.OnInitListener {
+
+    override fun attachBaseContext(newBase: Context) {
+        super.attachBaseContext(LocaleHelper.onAttach(newBase))
+    }
 
     companion object {
         val isPremiumState = mutableStateOf(false)
@@ -1078,7 +1083,7 @@ if (showGoalEditDialog) {
                     },
                     label = {
                         Text(
-                            text = "Home",
+                            text = stringResource(R.string.tab_radar),
                             fontSize = 11.sp,
                             fontWeight = if (selectedTab == 0) FontWeight.Bold else FontWeight.Normal
                         )
@@ -1103,7 +1108,7 @@ if (showGoalEditDialog) {
                     },
                     label = {
                         Text(
-                            text = "Profile",
+                            text = stringResource(R.string.tab_profile),
                             fontSize = 11.sp,
                             fontWeight = if (selectedTab == 1) FontWeight.Bold else FontWeight.Normal
                         )
@@ -1128,7 +1133,7 @@ if (showGoalEditDialog) {
                     },
                     label = {
                         Text(
-                            text = "History",
+                            text = stringResource(R.string.tab_history),
                             fontSize = 11.sp,
                             fontWeight = if (selectedTab == 2) FontWeight.Bold else FontWeight.Normal
                         )
@@ -1153,7 +1158,7 @@ if (showGoalEditDialog) {
                     },
                     label = {
                         Text(
-                            text = "Logs",
+                            text = stringResource(R.string.tab_logs),
                             fontSize = 11.sp,
                             fontWeight = if (selectedTab == 3) FontWeight.Bold else FontWeight.Normal
                         )
@@ -1178,7 +1183,7 @@ if (showGoalEditDialog) {
                     },
                     label = {
                         Text(
-                            text = "Settings",
+                            text = stringResource(R.string.tab_settings),
                             fontSize = 11.sp,
                             fontWeight = if (selectedTab == 4) FontWeight.Bold else FontWeight.Normal
                         )

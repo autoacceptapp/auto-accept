@@ -3,4 +3,17 @@
     <string name="accessibility_service_description">Monitors incoming ride orders and automatically accepts requests matching your criteria.</string>
     <!-- Web Client ID from Firebase Console / google-services.json (client/oauth_client with client_type 3) -->
     <string name="default_web_client_id">675050958546-io1h9ka7evqgrrpccdk7qavniq2bu1vb.apps.googleusercontent.com</string>
+
+    <!-- Dashboard Navigation Tabs -->
+    <string name="tab_radar">Radar</string>
+    <string name="tab_profile">Profile</string>
+    <string name="tab_history">History</string>
+    <string name="tab_logs">Logs</string>
+    <string name="tab_settings">Settings</string>
+
+    <!-- Overlay & Status Indicators -->
+    <string name="status_voice_only">Standby: Voice Announcer Only</string>
+    <string name="status_auto_accept_on">Active: Auto-Accept ON</string>
+    <string name="master_switch_title">Master Auto-Accept</string>
+    <string name="search_settings_hint">Search settings &amp; keywords...</string>
 </resources>

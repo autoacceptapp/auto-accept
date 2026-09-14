@@ -18,6 +18,7 @@ class RideStrikeApp : Application() {
         try {
             ServiceStatusNotificationManager.createNotificationChannel(this)
             ServiceStatusNotificationManager.updateStatus(this)
+            AutoAcceptService.createNotificationChannels(this)
             AutoAcceptService.initCache(this)
             
             if (AutoAcceptService.isAutomationEnabled(this)) {

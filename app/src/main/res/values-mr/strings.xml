@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Auto Accept</string>
+    <string name="accessibility_service_description">येणाऱ्या राइड ऑर्डर्सवर लक्ष ठेवते आणि तुमच्या अटींनुसार आपोआप स्वीकारते.</string>
+
+    <!-- Dashboard Navigation Tabs -->
+    <string name="tab_radar">रडार</string>
+    <string name="tab_profile">प्रोफाइल</string>
+    <string name="tab_history">इतिहास</string>
+    <string name="tab_logs">लॉग्स</string>
+    <string name="tab_settings">सेटिंग्ज</string>
+
+    <!-- Overlay & Status Indicators -->
+    <string name="status_voice_only">स्टँडबाय: फक्त व्हॉइस अनाउंसर</string>
+    <string name="status_auto_accept_on">सक्रिय: ऑटो-ॲक्सेप्ट सुरू</string>
+    <string name="master_switch_title">मास्टर ऑटो-ॲक्सेप्ट</string>
+    <string name="search_settings_hint">सेटिंग्ज आणि कीवर्ड्स शोधा...</string>
+</resources>

@@ -262,6 +262,7 @@ class AutoAcceptService : AccessibilityService(), TextToSpeech.OnInitListener {
         const val KEY_IS_PASS_ACTIVE = "key_is_pass_active"
         const val KEY_WAKE_LOCK_ENABLED = "key_wake_lock_enabled"
         const val KEY_LOCAL_RIDE_LOGS = "key_local_ride_logs"
+        const val KEY_VOICE_ONLY_MODE = "key_voice_only_mode"
 
         const val KEY_DAILY_TRIP_COUNT = "key_daily_trip_count"
         const val KEY_DAILY_GOAL = "key_daily_goal"
@@ -802,15 +803,73 @@ class AutoAcceptService : AccessibilityService(), TextToSpeech.OnInitListener {
             if (!enabled) {
                 instance?.cancelPendingAcceptInternal("Master switch turned OFF")
                 KeepAliveService.stop(context)
+                StatusOverlayManager.hide()
             } else {
                 KeepAliveService.start(context)
+                StatusOverlayManager.show(context)
             }
             _recentLog.value = if (enabled) {
                 "Master Switch: ON. Active & listening for orders."
             } else {
                 "Master Switch: OFF. Auto-accept is paused."
             }
+            instance?.updateForegroundNotification()
             ServiceStatusNotificationManager.updateStatus(context)
+        }
+
+        fun isVoiceOnlyMode(context: Context): Boolean {
+            val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            return prefs.getBoolean(KEY_VOICE_ONLY_MODE, false)
+        }
+
+        fun setVoiceOnlyMode(context: Context, enabled: Boolean) {
+            val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            prefs.edit().putBoolean(KEY_VOICE_ONLY_MODE, enabled).apply()
+            instance?.updateForegroundNotification()
+        }
+
+        fun updateForegroundStatus(context: Context, statusText: String? = null) {
+            instance?.updateForegroundNotification(statusText)
+        }
+
+        /**
+         * Creates and registers the notification channels for AutoAcceptService:
+         * 1. NOTIFICATION_CHANNEL_ID ("auto_accept_channel"): Foreground service persistent channel.
+         * 2. ALERT_CHANNEL_ID ("order_alerts_channel"): High-importance alert channel for order announcements.
+         */
+        fun createNotificationChannels(context: Context) {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                val notificationManager = context.getSystemService(Context.NOTIFICATION_SERVICE) as? NotificationManager
+                    ?: return
+
+                // 1. Persistent Foreground Service Channel
+                val foregroundChannel = NotificationChannel(
+                    NOTIFICATION_CHANNEL_ID,
+                    NOTIFICATION_CHANNEL_NAME,
+                    NotificationManager.IMPORTANCE_LOW
+                ).apply {
+                    description = "Keeps AutoAcceptService active in foreground to reliably monitor and accept rides during driving without being killed by Android"
+                    setShowBadge(false)
+                    enableLights(false)
+                    enableVibration(false)
+                    lockscreenVisibility = android.app.Notification.VISIBILITY_PUBLIC
+                }
+                notificationManager.createNotificationChannel(foregroundChannel)
+
+                // 2. High-Importance Order Alerts Channel
+                val alertChannel = NotificationChannel(
+                    ALERT_CHANNEL_ID,
+                    ALERT_CHANNEL_NAME,
+                    NotificationManager.IMPORTANCE_HIGH
+                ).apply {
+                    description = "Notifies and alerts you when incoming rides are detected or accepted"
+                    setShowBadge(true)
+                    enableVibration(true)
+                    enableLights(true)
+                    lockscreenVisibility = android.app.Notification.VISIBILITY_PUBLIC
+                }
+                notificationManager.createNotificationChannel(alertChannel)
+            }
         }
 
         // Wait Delay Time Before Clicking Accept (Milliseconds)
@@ -1651,11 +1710,112 @@ fun getCustomSoundUri(context: Context): String? {
         }
     }
 
+    /**
+     * Builds the persistent Foreground Service notification with current status.
+     */
+    fun buildForegroundNotification(context: Context, customStatusText: String? = null): android.app.Notification {
+        createNotificationChannels(context)
+
+        val isEnabled = isAutomationEnabled(context)
+        val isVoiceOnly = isVoiceOnlyMode(context)
+
+        val title: String
+        val defaultMessage: String
+        val colorInt: Int
+
+        when {
+            !isEnabled -> {
+                title = "Auto-Accept: Paused ⏸️"
+                defaultMessage = "Service standby. Master auto-accept switch is OFF."
+                colorInt = 0xFF6B7280.toInt() // Gray
+            }
+            isVoiceOnly -> {
+                title = "Auto-Accept: Passive Radar (Voice Only) 🎙️"
+                defaultMessage = "Announcing matching orders via voice without auto-clicking."
+                colorInt = 0xFFEF4444.toInt() // Red
+            }
+            else -> {
+                title = "Auto-Accept: Active & Monitoring 🟢"
+                defaultMessage = "Actively monitoring screen for incoming rides matching criteria."
+                colorInt = 0xFF10B981.toInt() // Green
+            }
+        }
+
+        val contentText = customStatusText ?: defaultMessage
+
+        val appIntent = Intent(context, MainActivity::class.java).apply {
+            flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP
+        }
+        val pendingIntent = PendingIntent.getActivity(
+            context,
+            100,
+            appIntent,
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
+
+        val bigText = buildString {
+            append("• Status: ").append(title)
+            append("\n• Message: ").append(contentText)
+            append("\n• Mode: ").append(if (isVoiceOnly) "Voice Announcer Only (Passive Radar)" else "Auto-Clicker Active")
+            append("\n• Master Switch: ").append(if (isEnabled) "ON" else "OFF")
+            append("\n• Protection: Foreground Service active to prevent Android kill during rides")
+        }
+
+        return NotificationCompat.Builder(context, NOTIFICATION_CHANNEL_ID)
+            .setSmallIcon(R.mipmap.ic_launcher)
+            .setContentTitle(title)
+            .setContentText(contentText)
+            .setStyle(NotificationCompat.BigTextStyle().bigText(bigText))
+            .setColor(colorInt)
+            .setOngoing(true)
+            .setOnlyAlertOnce(true)
+            .setPriority(NotificationCompat.PRIORITY_LOW)
+            .setCategory(NotificationCompat.CATEGORY_SERVICE)
+            .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
+            .setContentIntent(pendingIntent)
+            .build()
+    }
+
     private fun startForegroundNotification() {
+        try {
+            createNotificationChannels(this)
+            val notification = buildForegroundNotification(this)
+
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                try {
+                    startForeground(
+                        NOTIFICATION_ID,
+                        notification,
+                        ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE
+                    )
+                } catch (e: Throwable) {
+                    startForeground(NOTIFICATION_ID, notification)
+                }
+            } else {
+                startForeground(NOTIFICATION_ID, notification)
+            }
+            Log.i(TAG, "AutoAcceptService foreground notification started on channel $NOTIFICATION_CHANNEL_ID")
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to start foreground notification on AutoAcceptService: ${e.message}", e)
+        }
+
         if (isAutomationEnabled(this)) {
             KeepAliveService.start(this)
         }
-        ServiceStatusNotificationManager.startOrUpdateForeground(this)
+        ServiceStatusNotificationManager.updateStatus(this)
+    }
+
+    /**
+     * Updates the foreground notification text dynamically during ride lifecycle.
+     */
+    fun updateForegroundNotification(statusText: String? = null) {
+        try {
+            val notification = buildForegroundNotification(this, statusText)
+            val manager = getSystemService(Context.NOTIFICATION_SERVICE) as? NotificationManager
+            manager?.notify(NOTIFICATION_ID, notification)
+        } catch (e: Exception) {
+            Log.w(TAG, "Failed to update foreground notification: ${e.message}")
+        }
     }
 
     fun applyTtsLanguage(lang: String) {
@@ -1685,8 +1845,8 @@ fun getCustomSoundUri(context: Context): String? {
     }
 
     fun speak(text: String) {
-        if (!isPassActive(this)) {
-            Log.w(TAG, "Pass not active. TTS announcement blocked.")
+        if (!isVoiceOnlyMode(this) && !isPassActive(this)) {
+            Log.w(TAG, "Pass not active and Voice-Only Mode not active. TTS announcement blocked.")
             return
         }
         if (textToSpeech != null && isTtsInitialized) {
@@ -1777,9 +1937,10 @@ fun getCustomSoundUri(context: Context): String? {
      * Inspects active window, verifies ride details, applies filter policies, and schedules pending accept.
      */
     private fun sendAutoAcceptNotification(context: Context, title: String, message: String) {
+        createNotificationChannels(context)
         val manager = context.getSystemService(Context.NOTIFICATION_SERVICE) as android.app.NotificationManager
         val builder = androidx.core.app.NotificationCompat.Builder(context, ALERT_CHANNEL_ID)
-            .setSmallIcon(android.R.drawable.ic_dialog_info)
+            .setSmallIcon(R.mipmap.ic_launcher)
             .setContentTitle(title)
             .setContentText(message)
             .setPriority(androidx.core.app.NotificationCompat.PRIORITY_HIGH)
@@ -1989,6 +2150,7 @@ fun getCustomSoundUri(context: Context): String? {
 
             BoundingBoxManager.updateBox(bestBoxBounds)
             StatusOverlayManager.updateLastPrice(parsedPrice)
+            updateForegroundNotification("Processing ride: $fareInfo ($distInfo)")
 
             if (isWakeLockEnabled(this)) {
                 wakeUpScreenAndUnlock(this)
@@ -2020,6 +2182,40 @@ fun getCustomSoundUri(context: Context): String? {
                         return@launch
                     }
 
+                    if (isVoiceOnlyMode(this@AutoAcceptService)) {
+                        lastClickTimestamp = SystemClock.uptimeMillis()
+                        isGenuineOrderIncoming = false
+                        notificationResetJob?.cancel()
+                        recentlyAcceptedRides[capturedRide.signature] = System.currentTimeMillis()
+                        cleanStaleAcceptedRides()
+
+                        val finalFare = capturedRide.price?.let { "₹${it.toInt()}" } ?: "Fare ~"
+                        val finalDist = capturedRide.distanceKm?.let { "${it} km" } ?: "Dist ~"
+
+                        val logMessage = "Passive Radar: Voice only announcement for $finalFare ($finalDist) to ${capturedRide.drop}"
+                        Log.i(TAG, logMessage)
+                        _recentLog.value = logMessage
+                        updateForegroundNotification("Announced ride: $finalFare ($finalDist)")
+                        logServiceEvent(
+                            type = ServiceEventType.RIDE_DETECTED,
+                            title = "Voice Announcement Only",
+                            description = "Passive Radar announced ride for $finalFare ($finalDist)",
+                            details = "Voice-only mode active: button click bypassed",
+                            badge = "RADAR"
+                        )
+
+                        val userName = getUserName(this@AutoAcceptService).ifBlank { DEFAULT_USER_NAME }
+                        val announcement = generateOrderAnnouncement(
+                            context = this@AutoAcceptService,
+                            name = userName,
+                            price = capturedRide.price?.toInt(),
+                            distanceKm = capturedRide.distanceKm,
+                            dropLocation = capturedRide.drop
+                        )
+                        speak(announcement)
+                        return@launch
+                    }
+
                     when (val outcome = executeAcceptClick(validButton)) {
                         is ClickResult.Success -> {
                             lastClickTimestamp = SystemClock.uptimeMillis()
@@ -2035,6 +2231,7 @@ fun getCustomSoundUri(context: Context): String? {
                             val logMessage = "Accepted order in ${capturedRide.sourcePackage} [$finalFare | $finalDist] $engineMode"
                             Log.i(TAG, logMessage)
                             _recentLog.value = logMessage
+                            updateForegroundNotification("Accepted: $finalFare ($finalDist)")
                             logServiceEvent(
                                 type = ServiceEventType.ORDER_ACCEPTED,
                                 title = "Order accepted",

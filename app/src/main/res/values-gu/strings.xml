@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Auto Accept</string>
+    <string name="accessibility_service_description">આવતા રાઇડ ઓર્ડર પર નજર રાખે છે અને તમારી શરતો મુજબ આપમેળે સ્વીકારે છે.</string>
+
+    <!-- Dashboard Navigation Tabs -->
+    <string name="tab_radar">રડાર</string>
+    <string name="tab_profile">પ્રોફાઇલ</string>
+    <string name="tab_history">ઇતિહાસ</string>
+    <string name="tab_logs">લૉગ્સ</string>
+    <string name="tab_settings">સેટિંગ્સ</string>
+
+    <!-- Overlay & Status Indicators -->
+    <string name="status_voice_only">સ્ટેન્ડબાય: માત્ર વૉઇસ એનાઉન્સર</string>
+    <string name="status_auto_accept_on">સક્રિય: ઓટો-એક્સેપ્ટ ચાલુ</string>
+    <string name="master_switch_title">માસ્ટર ઓટો-એક્સેપ્ટ</string>
+    <string name="search_settings_hint">સેટિંગ્સ અને કીવર્ડ્સ શોધો...</string>
+</resources>
