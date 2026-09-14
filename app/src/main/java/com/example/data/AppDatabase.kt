@@ -6,12 +6,13 @@ import androidx.room.Room
 import androidx.room.RoomDatabase
 
 @Database(
-    entities = [TargetApp::class, Keyword::class, FilterSettings::class, TripHistoryRecord::class, CustomFilterRule::class],
-    version = 3,
+    entities = [TargetApp::class, Keyword::class, FilterSettings::class, TripHistoryRecord::class, CustomFilterRule::class, RideRecord::class],
+    version = 4,
     exportSchema = false
 )
 abstract class AppDatabase : RoomDatabase() {
     abstract fun settingsDao(): SettingsDao
+    abstract fun rideDao(): RideDao
 
     companion object {
         @Volatile

@@ -1,6 +1,17 @@
 package com.example
 import android.annotation.SuppressLint
 import androidx.compose.ui.graphics.Brush
+import androidx.compose.material3.ModalBottomSheet
+import androidx.compose.material3.rememberModalBottomSheetState
+import androidx.compose.material3.BottomSheetDefaults
+import androidx.compose.material.icons.filled.AutoAwesome
+import kotlinx.coroutines.Dispatchers
+import com.example.data.AppDatabase
+import com.example.data.RideRecord
+import com.example.data.PriceHeuristicEngine
+import com.example.data.PriceRecommendation
+import com.example.data.PriceTierStats
+import com.example.data.FilterSettings
 
 import android.Manifest
 import android.content.ComponentName
@@ -838,6 +849,7 @@ fun AutoAcceptDashboardScreen(
 var dailyGoal by remember { mutableStateOf(AutoAcceptService.getDailyGoal(context)) }
     var showGoalEditDialog by remember { mutableStateOf(false) }
     var showPreferencesScreen by remember { mutableStateOf(false) }
+    var showHeuristicSheet by remember { mutableStateOf(false) }
     var goalInputText by remember { mutableStateOf(dailyGoal.toString()) }
     val tripHistory by AutoAcceptService.tripHistory.collectAsStateWithLifecycle()
 
@@ -2555,6 +2567,7 @@ if (showGoalEditDialog) {
                 updateInfoToPrompt = updateInfo
             },
             onOpenPreferences = { showPreferencesScreen = true },
+            onOpenHeuristicSheet = { showHeuristicSheet = true },
             ignoredCount = totalIgnoredCount
         )
     }
@@ -2697,6 +2710,462 @@ if (showGoalEditDialog) {
                         }
                     }
                 }
+            )
+        }
+
+        // AI Price Heuristic Insights Bottom Sheet
+        if (showHeuristicSheet) {
+            HeuristicInsightsBottomSheet(
+                onDismiss = { showHeuristicSheet = false },
+                onApplyRange = { min, max ->
+                    minPriceInput = min.toInt().toString()
+                    maxPriceInput = max.toInt().toString()
+                    isPriceFilterOn = true
+                    AutoAcceptService.setMinPrice(context, min)
+                    AutoAcceptService.setMaxPrice(context, max)
+                    AutoAcceptService.setPriceFilterEnabled(context, true)
+                }
+            )
+        }
+    }
+}
+
+/**
+ * AI Price Heuristic Insights Bottom Sheet.
+ * Displays autonomous machine learning insights derived from historical driver
+ * accept/reject decisions, dynamic tier statistics, simulated decision events,
+ * and allows 1-click application of recommended fare thresholds.
+ */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun HeuristicInsightsBottomSheet(
+    onDismiss: () -> Unit,
+    onApplyRange: ((Float, Float) -> Unit)? = null
+) {
+    val context = LocalContext.current
+    val coroutineScope = rememberCoroutineScope()
+    val rideDao = remember { AppDatabase.getDatabase(context).rideDao() }
+    val records by rideDao.getAllRecordsFlow().collectAsStateWithLifecycle(initialValue = emptyList())
+    val recommendation = remember(records) {
+        PriceHeuristicEngine.analyze(records)
+    }
+    val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+
+    ModalBottomSheet(
+        onDismissRequest = onDismiss,
+        sheetState = sheetState,
+        containerColor = Slate900,
+        contentColor = Slate50,
+        dragHandle = {
+            BottomSheetDefaults.DragHandle(color = Slate600)
+        }
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 20.dp, vertical = 8.dp)
+                .verticalScroll(rememberScrollState())
+                .testTag("heuristic_insights_bottom_sheet"),
+            verticalArrangement = Arrangement.spacedBy(16.dp)
+        ) {
+            // Header: Title + Confidence Badge
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Box(
+                        modifier = Modifier
+                            .size(38.dp)
+                            .clip(CircleShape)
+                            .background(CyanGlow),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.AutoAwesome,
+                            contentDescription = "AI Insights",
+                            tint = Cyan400,
+                            modifier = Modifier.size(20.dp)
+                        )
+                    }
+                    Spacer(modifier = Modifier.width(12.dp))
+                    Column {
+                        Text(
+                            text = "Price Heuristic Insights",
+                            style = MaterialTheme.typography.titleMedium,
+                            fontWeight = FontWeight.Bold,
+                            color = Slate50
+                        )
+                        Text(
+                            text = "Autonomous fare learning engine",
+                            fontSize = 11.sp,
+                            color = Slate400
+                        )
+                    }
+                }
+
+                Surface(
+                    shape = RoundedCornerShape(8.dp),
+                    color = when {
+                        recommendation.confidenceBadge.contains("HIGH") -> EmeraldGlow
+                        recommendation.confidenceBadge.contains("MODERATE") -> CyanGlow
+                        else -> AmberGlow
+                    },
+                    border = BorderStroke(
+                        1.dp,
+                        when {
+                            recommendation.confidenceBadge.contains("HIGH") -> Emerald500.copy(alpha = 0.5f)
+                            recommendation.confidenceBadge.contains("MODERATE") -> Cyan500.copy(alpha = 0.5f)
+                            else -> Amber500.copy(alpha = 0.5f)
+                        }
+                    )
+                ) {
+                    Text(
+                        text = recommendation.confidenceBadge,
+                        fontSize = 10.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = when {
+                            recommendation.confidenceBadge.contains("HIGH") -> Emerald400
+                            recommendation.confidenceBadge.contains("MODERATE") -> Cyan400
+                            else -> Amber400
+                        },
+                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp)
+                    )
+                }
+            }
+
+            // Hero Card: Suggested Range & Rationale
+            Card(
+                modifier = Modifier.fillMaxWidth(),
+                shape = RoundedCornerShape(16.dp),
+                colors = CardDefaults.cardColors(containerColor = Slate950),
+                border = BorderStroke(1.dp, Slate800)
+            ) {
+                Column(
+                    modifier = Modifier.padding(16.dp),
+                    verticalArrangement = Arrangement.spacedBy(12.dp)
+                ) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Column {
+                            Text(
+                                text = "RECOMMENDED FARE WINDOW",
+                                fontSize = 11.sp,
+                                fontWeight = FontWeight.SemiBold,
+                                color = Slate400,
+                                letterSpacing = 1.sp
+                            )
+                            Spacer(modifier = Modifier.height(4.dp))
+                            Text(
+                                text = "₹${recommendation.suggestedMinPrice.toInt()} - ₹${recommendation.suggestedMaxPrice.toInt()}",
+                                fontSize = 28.sp,
+                                fontWeight = FontWeight.ExtraBold,
+                                color = Cyan400
+                            )
+                        }
+
+                        // Decision tally pill
+                        Surface(
+                            shape = RoundedCornerShape(10.dp),
+                            color = Slate900,
+                            border = BorderStroke(1.dp, Slate800)
+                        ) {
+                            Column(
+                                modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
+                                horizontalAlignment = Alignment.End
+                            ) {
+                                Text(
+                                    text = "${recommendation.totalDecisions} Decisions",
+                                    fontSize = 11.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    color = Slate200
+                                )
+                                Text(
+                                    text = "${recommendation.acceptedDecisions} Accepted • ${recommendation.rejectedDecisions} Rejected",
+                                    fontSize = 10.sp,
+                                    color = Slate400
+                                )
+                            }
+                        }
+                    }
+
+                    // Rationale text
+                    Surface(
+                        shape = RoundedCornerShape(12.dp),
+                        color = Slate900.copy(alpha = 0.6f),
+                        border = BorderStroke(1.dp, Slate850)
+                    ) {
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(12.dp),
+                            verticalAlignment = Alignment.Top
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.Info,
+                                contentDescription = null,
+                                tint = Cyan400,
+                                modifier = Modifier
+                                    .size(16.dp)
+                                    .padding(top = 2.dp)
+                            )
+                            Spacer(modifier = Modifier.width(10.dp))
+                            Text(
+                                text = recommendation.rationale,
+                                fontSize = 12.sp,
+                                color = Slate300,
+                                lineHeight = 18.sp
+                            )
+                        }
+                    }
+                }
+            }
+
+            // Tier Breakdown Section
+            Text(
+                text = "FARE TIER BREAKDOWN",
+                fontSize = 11.sp,
+                fontWeight = FontWeight.Bold,
+                color = Slate400,
+                letterSpacing = 1.sp
+            )
+
+            // Low / Mid / High Tier Cards
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                TierStatCard(
+                    tier = recommendation.lowTier,
+                    accentColor = Amber400,
+                    modifier = Modifier.weight(1f)
+                )
+                TierStatCard(
+                    tier = recommendation.midTier,
+                    accentColor = Emerald400,
+                    modifier = Modifier.weight(1f)
+                )
+                TierStatCard(
+                    tier = recommendation.highTier,
+                    accentColor = Cyan400,
+                    modifier = Modifier.weight(1f)
+                )
+            }
+
+            // Simulation Controls
+            Card(
+                modifier = Modifier.fillMaxWidth(),
+                shape = RoundedCornerShape(16.dp),
+                colors = CardDefaults.cardColors(containerColor = Slate950),
+                border = BorderStroke(1.dp, Slate800)
+            ) {
+                Column(
+                    modifier = Modifier.padding(14.dp),
+                    verticalArrangement = Arrangement.spacedBy(10.dp)
+                ) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(
+                            text = "SIMULATE DRIVER DECISIONS",
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = Slate400,
+                            letterSpacing = 1.sp
+                        )
+                        if (records.isNotEmpty()) {
+                            TextButton(
+                                onClick = {
+                                    coroutineScope.launch(Dispatchers.IO) {
+                                        rideDao.clearAll()
+                                    }
+                                },
+                                contentPadding = PaddingValues(0.dp)
+                            ) {
+                                Text("Reset Data", fontSize = 11.sp, color = Rose400)
+                            }
+                        }
+                    }
+
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        // 1. Simulate Reject Low
+                        OutlinedButton(
+                            onClick = {
+                                coroutineScope.launch(Dispatchers.IO) {
+                                    val fare = (30..70).random().toFloat()
+                                    rideDao.insert(
+                                        RideRecord(
+                                            fare = fare,
+                                            status = "REJECTED"
+                                        )
+                                    )
+                                }
+                            },
+                            modifier = Modifier
+                                .weight(1f)
+                                .testTag("simulate_reject_low_button"),
+                            shape = RoundedCornerShape(10.dp),
+                            border = BorderStroke(1.dp, Rose500.copy(alpha = 0.5f)),
+                            colors = ButtonDefaults.outlinedButtonColors(contentColor = Rose400),
+                            contentPadding = PaddingValues(horizontal = 4.dp, vertical = 8.dp)
+                        ) {
+                            Text("Simulate Reject Low\n(₹30-₹70)", fontSize = 10.sp, fontWeight = FontWeight.Bold, textAlign = TextAlign.Center)
+                        }
+
+                        // 2. Simulate Accept Mid
+                        OutlinedButton(
+                            onClick = {
+                                coroutineScope.launch(Dispatchers.IO) {
+                                    val fare = (90..180).random().toFloat()
+                                    rideDao.insert(
+                                        RideRecord(
+                                            fare = fare,
+                                            status = "ACCEPTED"
+                                        )
+                                    )
+                                }
+                            },
+                            modifier = Modifier
+                                .weight(1f)
+                                .testTag("simulate_accept_mid_button"),
+                            shape = RoundedCornerShape(10.dp),
+                            border = BorderStroke(1.dp, Emerald500.copy(alpha = 0.5f)),
+                            colors = ButtonDefaults.outlinedButtonColors(contentColor = Emerald400),
+                            contentPadding = PaddingValues(horizontal = 4.dp, vertical = 8.dp)
+                        ) {
+                            Text("Simulate Accept Mid\n(₹90-₹180)", fontSize = 10.sp, fontWeight = FontWeight.Bold, textAlign = TextAlign.Center)
+                        }
+
+                        // 3. Simulate Accept High / Reject High
+                        OutlinedButton(
+                            onClick = {
+                                coroutineScope.launch(Dispatchers.IO) {
+                                    val fare = (230..380).random().toFloat()
+                                    rideDao.insert(
+                                        RideRecord(
+                                            fare = fare,
+                                            status = "ACCEPTED"
+                                        )
+                                    )
+                                }
+                            },
+                            modifier = Modifier
+                                .weight(1f)
+                                .testTag("simulate_accept_high_button"),
+                            shape = RoundedCornerShape(10.dp),
+                            border = BorderStroke(1.dp, Cyan500.copy(alpha = 0.5f)),
+                            colors = ButtonDefaults.outlinedButtonColors(contentColor = Cyan400),
+                            contentPadding = PaddingValues(horizontal = 4.dp, vertical = 8.dp)
+                        ) {
+                            Text("Simulate Accept High\n(₹230-₹380)", fontSize = 10.sp, fontWeight = FontWeight.Bold, textAlign = TextAlign.Center)
+                        }
+                    }
+                }
+            }
+
+            // Action Buttons: Apply Range & Close
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(bottom = 16.dp),
+                horizontalArrangement = Arrangement.spacedBy(12.dp)
+            ) {
+                OutlinedButton(
+                    onClick = onDismiss,
+                    modifier = Modifier.weight(1f),
+                    shape = RoundedCornerShape(12.dp),
+                    border = BorderStroke(1.dp, Slate700),
+                    colors = ButtonDefaults.outlinedButtonColors(contentColor = Slate300)
+                ) {
+                    Text("Close", fontWeight = FontWeight.SemiBold)
+                }
+
+                Button(
+                    onClick = {
+                        val min = recommendation.suggestedMinPrice
+                        val max = recommendation.suggestedMaxPrice
+                        AutoAcceptService.setMinPrice(context, min)
+                        AutoAcceptService.setMaxPrice(context, max)
+                        AutoAcceptService.setPriceFilterEnabled(context, true)
+                        coroutineScope.launch(Dispatchers.IO) {
+                            val db = AppDatabase.getDatabase(context)
+                            val current = db.settingsDao().getFilterSettingsSync() ?: FilterSettings()
+                            db.settingsDao().insertFilterSettings(
+                                current.copy(minPrice = min, maxPrice = max, isPriceFilterOn = true)
+                            )
+                        }
+                        onApplyRange?.invoke(min, max)
+                        onDismiss()
+                    },
+                    modifier = Modifier
+                        .weight(2f)
+                        .testTag("apply_heuristic_range_button"),
+                    shape = RoundedCornerShape(12.dp),
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = Cyan400,
+                        contentColor = Slate950
+                    )
+                ) {
+                    Icon(Icons.Default.CheckCircle, contentDescription = null, modifier = Modifier.size(16.dp))
+                    Spacer(modifier = Modifier.width(6.dp))
+                    Text(
+                        text = "Apply Range (₹${recommendation.suggestedMinPrice.toInt()} - ₹${recommendation.suggestedMaxPrice.toInt()})",
+                        fontWeight = FontWeight.Bold,
+                        fontSize = 13.sp
+                    )
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun TierStatCard(
+    tier: PriceTierStats,
+    accentColor: androidx.compose.ui.graphics.Color,
+    modifier: Modifier = Modifier
+) {
+    Surface(
+        shape = RoundedCornerShape(12.dp),
+        color = Slate950,
+        border = BorderStroke(1.dp, Slate800),
+        modifier = modifier
+    ) {
+        Column(
+            modifier = Modifier.padding(10.dp),
+            horizontalAlignment = Alignment.CenterHorizontally
+        ) {
+            Text(
+                text = tier.tierName,
+                fontSize = 11.sp,
+                fontWeight = FontWeight.Bold,
+                color = Slate200
+            )
+            Text(
+                text = tier.rangeLabel,
+                fontSize = 10.sp,
+                color = Slate400
+            )
+            Spacer(modifier = Modifier.height(6.dp))
+            Text(
+                text = "${tier.acceptRatePercent}%",
+                fontSize = 18.sp,
+                fontWeight = FontWeight.ExtraBold,
+                color = accentColor
+            )
+            Text(
+                text = "${tier.acceptedCount}✓ / ${tier.rejectedCount}✗",
+                fontSize = 10.sp,
+                color = Slate400
             )
         }
     }
@@ -3403,6 +3872,7 @@ fun SettingsTabContent(
     onRefreshPermissions: () -> Unit,
     onUpdateAvailable: (GitHubUpdateManager.UpdateInfo) -> Unit,
     onOpenPreferences: () -> Unit = {},
+    onOpenHeuristicSheet: () -> Unit = {},
     ignoredCount: Int,
     modifier: Modifier = Modifier
 ) {
@@ -4324,6 +4794,33 @@ fun SettingsTabContent(
                                 )
                             )
                         }
+                    }
+
+                    // AI Price Heuristic Insights Trigger Button
+                    OutlinedButton(
+                        onClick = onOpenHeuristicSheet,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .testTag("ai_price_heuristic_button"),
+                        shape = RoundedCornerShape(12.dp),
+                        border = BorderStroke(1.dp, Cyan500.copy(alpha = 0.6f)),
+                        colors = ButtonDefaults.outlinedButtonColors(
+                            containerColor = Slate950,
+                            contentColor = Cyan400
+                        )
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.AutoAwesome,
+                            contentDescription = null,
+                            tint = Cyan400,
+                            modifier = Modifier.size(18.dp)
+                        )
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text(
+                            text = "AI Price Heuristic Insights",
+                            fontWeight = FontWeight.Bold,
+                            fontSize = 13.sp
+                        )
                     }
                 }
             }
