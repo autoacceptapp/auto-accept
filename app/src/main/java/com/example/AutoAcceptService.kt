@@ -2061,13 +2061,14 @@ fun getCustomSoundUri(context: Context): String? {
         if (eventPackage.isEmpty() ||
             eventPackage == packageName ||
             eventPackage == "android" ||
-            eventPackage == "com.android.systemui"
+            eventPackage == "com.android.systemui" ||
+            eventPackage == "com.google.android.apps.maps"
         ) {
             return
         }
 
         // Strict early return if event does not originate from allowed Rapido packages
-        if (isTargetRapidoOnly(this) && !getEnabledApps(this@AutoAcceptService).contains(eventPackage)) {
+        if (eventPackage != RAPIDO_CAPTAIN_PACKAGE) {
             return
         }
 
@@ -2094,7 +2095,10 @@ fun getCustomSoundUri(context: Context): String? {
         } ?: return
 
         val nodePackage = targetNode.packageName?.toString() ?: eventPackage
-        if (isTargetRapidoOnly(this) && !getEnabledApps(this@AutoAcceptService).contains(nodePackage)) {
+        if (nodePackage == "com.google.android.apps.maps" || nodePackage == "com.android.systemui") {
+            return
+        }
+        if (nodePackage != RAPIDO_CAPTAIN_PACKAGE) {
             return
         }
 
@@ -2149,6 +2153,11 @@ fun getCustomSoundUri(context: Context): String? {
 
             val parsedDistance = extractDistance(cardTexts)
             val parsedPrice = extractPrice(cardTexts)
+
+            if (parsedPrice == null || parsedPrice <= 0f) {
+                continue // Skip: Real orders ALWAYS have a concrete fare amount!
+            }
+            
             val parsedRating = extractPassengerRating(cardTexts)
             val parsedPickup = extractPickupLocation(cardTexts) ?: "Nearby Pickup"
             val parsedDrop = extractDropLocation(cardTexts) ?: "Destination Drop"
@@ -2683,6 +2692,16 @@ fun getCustomSoundUri(context: Context): String? {
                 node.contentDescription?.toString()?.trim()
             ).filter { it.isNotBlank() }
 
+            var isMapControl = false
+            for (text in textCandidates) {
+                val t = text.lowercase()
+                if (t.contains("open step list") || t.contains("recenter") || t.contains("mute") || t.contains("route") || t.contains("navigation")) {
+                    isMapControl = true
+                    break
+                }
+            }
+            if (isMapControl) continue
+
             for (text in textCandidates) {
                 if (isValidAcceptText(this, text)) {
                     if (isNodeValidAcceptButton(node)) {
@@ -2793,6 +2812,11 @@ fun getCustomSoundUri(context: Context): String? {
             try {
                 node.getBoundsInScreen(bounds)
             } catch (e: Exception) {
+                continue
+            }
+
+            val nodeText = (node.text?.toString() ?: node.contentDescription?.toString() ?: "").lowercase()
+            if (nodeText.contains("open step list") || nodeText.contains("recenter") || nodeText.contains("mute") || nodeText.contains("route") || nodeText.contains("navigation")) {
                 continue
             }
 

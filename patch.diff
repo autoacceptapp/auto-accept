@@ -1,0 +1,40 @@
+--- app/src/main/java/com/example/AutoAcceptService.kt
++++ app/src/main/java/com/example/AutoAcceptService.kt
+@@ -2061,12 +2061,16 @@
+         if (eventPackage.isEmpty() ||
+             eventPackage == packageName ||
+             eventPackage == "android" ||
+-            eventPackage == "com.android.systemui"
++            eventPackage == "com.android.systemui" ||
++            eventPackage == "com.google.android.apps.maps"
+         ) {
+             return
+         }
+ 
+         // Strict early return if event does not originate from allowed Rapido packages
+-        if (isTargetRapidoOnly(this) && !getEnabledApps(this@AutoAcceptService).contains(eventPackage)) {
++        if (eventPackage != RAPIDO_CAPTAIN_PACKAGE) {
+             return
+         }
+ 
+@@ -2094,7 +2098,11 @@
+ 
+         val nodePackage = targetNode.packageName?.toString() ?: eventPackage
+-        if (isTargetRapidoOnly(this) && !getEnabledApps(this@AutoAcceptService).contains(nodePackage)) {
++        if (nodePackage == "com.google.android.apps.maps" || nodePackage == "com.android.systemui") {
++            return
++        }
++        if (nodePackage != RAPIDO_CAPTAIN_PACKAGE) {
+             return
+         }
+ 
+@@ -2149,6 +2157,10 @@
+ 
+             val parsedDistance = extractDistance(cardTexts)
+             val parsedPrice = extractPrice(cardTexts)
++
++            if (parsedPrice == null || parsedPrice <= 0f) {
++                continue // Skip: Real orders ALWAYS have a concrete fare amount!
++            }
+             val parsedRating = extractPassengerRating(cardTexts)
+             val parsedPickup = extractPickupLocation(cardTexts) ?: "Nearby Pickup"
