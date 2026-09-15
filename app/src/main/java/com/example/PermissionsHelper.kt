@@ -670,3 +670,135 @@ fun MissingPermissionRow(
         }
     }
 }
+
+fun openAppInfoSettings(context: Context) {
+    try {
+        val intent = Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS).apply {
+            data = Uri.parse("package:${context.packageName}")
+            flags = Intent.FLAG_ACTIVITY_NEW_TASK
+        }
+        context.startActivity(intent)
+    } catch (e: Exception) {
+        Toast.makeText(context, "Could not open App Info", Toast.LENGTH_SHORT).show()
+    }
+}
+
+@Composable
+fun RestrictedSettingsGuideDialog(
+    onDismiss: () -> Unit,
+    onOpenAppInfo: () -> Unit,
+    onOpenAccessibility: () -> Unit
+) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        containerColor = Color(0xFF0F172A), // Slate900
+        shape = RoundedCornerShape(20.dp),
+        title = {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Icon(Icons.Default.Warning, contentDescription = null, tint = Color(0xFFFBBF24), modifier = Modifier.size(24.dp))
+                Spacer(modifier = Modifier.width(10.dp))
+                Text("Android 13+ Security", fontWeight = FontWeight.Bold, color = Color(0xFFF8FAFC), fontSize = 18.sp)
+            }
+        },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                Text("Android hides Accessibility settings for downloaded apps. If you see a 'Restricted Setting' warning, follow these steps:", color = Color(0xFFCBD5E1), fontSize = 13.sp)
+                Surface(shape = RoundedCornerShape(10.dp), color = Color(0xFF020617), border = BorderStroke(1.dp, Color(0xFF1E293B)), modifier = Modifier.fillMaxWidth()) {
+                    Column(modifier = Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                        Text("1. Tap 'Open App Info' below.", color = Color(0xFF94A3B8), fontSize = 12.sp)
+                        Text("2. Tap the 3 dots (⋮) in the top right corner.", color = Color(0xFF22D3EE), fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                        Text("3. Tap 'Allow restricted settings' and enter your PIN/Fingerprint.", color = Color(0xFF94A3B8), fontSize = 12.sp)
+                        Text("4. Come back and enable Accessibility normally.", color = Color(0xFF94A3B8), fontSize = 12.sp)
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            Button(onClick = onOpenAppInfo, colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF06B6D4), contentColor = Color(0xFF020617)), shape = RoundedCornerShape(10.dp)) {
+                Text("1. Open App Info", fontWeight = FontWeight.Bold)
+            }
+        },
+        dismissButton = {
+            OutlinedButton(onClick = onOpenAccessibility, shape = RoundedCornerShape(10.dp), border = BorderStroke(1.dp, Color(0xFF334155)), colors = ButtonDefaults.outlinedButtonColors(contentColor = Color(0xFFCBD5E1))) {
+                Text("2. Open Accessibility")
+            }
+        }
+    )
+}
+
+
+@Composable
+fun NotificationAccessGuideDialog(onDismiss: () -> Unit, onProceed: () -> Unit) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        containerColor = Color(0xFF0F172A),
+        shape = RoundedCornerShape(20.dp),
+        title = { Text("Notification Access", fontWeight = FontWeight.Bold, color = Color.White) },
+        text = {
+            Column {
+                Text("To detect incoming rides instantly, the app needs to read Rapido notifications.", color = Color(0xFFCBD5E1), fontSize = 13.sp)
+                Spacer(Modifier.height(10.dp))
+                Surface(shape = RoundedCornerShape(10.dp), color = Color(0xFF020617)) {
+                    Column(modifier = Modifier.padding(12.dp)) {
+                        Text("1. Tap 'Proceed' below.", color = Color(0xFF94A3B8), fontSize = 12.sp)
+                        Text("2. Find and tap on 'Auto Accept'.", color = Color(0xFF22D3EE), fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                        Text("3. Turn ON 'Allow notification access'.", color = Color(0xFF94A3B8), fontSize = 12.sp)
+                    }
+                }
+            }
+        },
+        confirmButton = { Button(onClick = onProceed) { Text("Proceed") } },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel", color = Color.Gray) } }
+    )
+}
+
+@Composable
+fun AutoStartGuideDialog(onDismiss: () -> Unit, onProceed: () -> Unit) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        containerColor = Color(0xFF0F172A),
+        shape = RoundedCornerShape(20.dp),
+        title = { Text("Background Auto-Start", fontWeight = FontWeight.Bold, color = Color.White) },
+        text = {
+            Column {
+                Text("Prevent your phone from killing the app in the background while you drive.", color = Color(0xFFCBD5E1), fontSize = 13.sp)
+                Spacer(Modifier.height(10.dp))
+                Surface(shape = RoundedCornerShape(10.dp), color = Color(0xFF020617)) {
+                    Column(modifier = Modifier.padding(12.dp)) {
+                        Text("1. Tap 'Proceed' below.", color = Color(0xFF94A3B8), fontSize = 12.sp)
+                        Text("2. Find 'Auto Accept' in the list.", color = Color(0xFF22D3EE), fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                        Text("3. Turn the switch ON.", color = Color(0xFF94A3B8), fontSize = 12.sp)
+                    }
+                }
+            }
+        },
+        confirmButton = { Button(onClick = onProceed) { Text("Proceed") } },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel", color = Color.Gray) } }
+    )
+}
+
+@Composable
+fun DisplayOverlayGuideDialog(onDismiss: () -> Unit, onProceed: () -> Unit) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        containerColor = Color(0xFF0F172A),
+        shape = RoundedCornerShape(20.dp),
+        title = { Text("Display Over Other Apps", fontWeight = FontWeight.Bold, color = Color.White) },
+        text = {
+            Column {
+                Text("Required to show the green auto-accept status bubble while you use maps or other apps.", color = Color(0xFFCBD5E1), fontSize = 13.sp)
+                Spacer(Modifier.height(10.dp))
+                Surface(shape = RoundedCornerShape(10.dp), color = Color(0xFF020617)) {
+                    Column(modifier = Modifier.padding(12.dp)) {
+                        Text("1. Tap 'Proceed' below.", color = Color(0xFF94A3B8), fontSize = 12.sp)
+                        Text("2. Find and tap 'Auto Accept'.", color = Color(0xFF22D3EE), fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                        Text("3. Turn ON 'Allow display over other apps'.", color = Color(0xFF94A3B8), fontSize = 12.sp)
+                    }
+                }
+            }
+        },
+        confirmButton = { Button(onClick = onProceed) { Text("Proceed") } },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel", color = Color.Gray) } }
+    )
+}
+

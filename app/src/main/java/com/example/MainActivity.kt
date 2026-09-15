@@ -93,6 +93,9 @@ import androidx.compose.material.icons.filled.Radar
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Schedule
 import androidx.compose.material.icons.filled.Settings
+import androidx.compose.material.icons.filled.SupportAgent
+import androidx.compose.material.icons.filled.ChevronRight
+import androidx.compose.material.icons.filled.Chat
 import androidx.compose.material.icons.filled.SystemUpdate
 import androidx.compose.material.icons.filled.TrendingUp
 import androidx.compose.material.icons.filled.Tune
@@ -496,6 +499,12 @@ fun AutoAcceptDashboardScreen(
     onTestVoice: (String) -> Unit = {}
 ) {
     val context = LocalContext.current
+    var showHelpScreen by remember { mutableStateOf(false) }
+    var showChatbotScreen by remember { mutableStateOf(false) }
+    var showRestrictedGuide by remember { mutableStateOf(false) }
+    var showNotificationGuide by remember { mutableStateOf(false) }
+    var showAutoStartGuide by remember { mutableStateOf(false) }
+    var showOverlayGuide by remember { mutableStateOf(false) }
     val lifecycleOwner = LocalLifecycleOwner.current
     val coroutineScope = rememberCoroutineScope()
 
@@ -766,8 +775,14 @@ fun AutoAcceptDashboardScreen(
             isAccessibilityEnabled = isAccessibilityEnabled,
             isOverlayAllowed = isOverlayAllowed,
             isBatteryOptimizationIgnored = isBatteryOptimizationIgnored,
-            onOpenAccessibility = { openAccessibilitySettings(context) },
-            onOpenOverlay = { openOverlaySettings(context) },
+            onOpenAccessibility = {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                    showRestrictedGuide = true
+                } else {
+                    openAccessibilitySettings(context)
+                }
+            },
+            onOpenOverlay = { showOverlayGuide = true },
             onOpenBatteryOptimization = { openBatteryOptimizationSettings(context) },
             onDismiss = { userDismissedPermissionsDialog = true }
         )
@@ -855,7 +870,6 @@ fun AutoAcceptDashboardScreen(
     val bestSuccessStreak by AutoAcceptService.bestSuccessStreak.collectAsStateWithLifecycle()
 var dailyGoal by remember { mutableStateOf(AutoAcceptService.getDailyGoal(context)) }
     var showGoalEditDialog by remember { mutableStateOf(false) }
-    var showPreferencesScreen by remember { mutableStateOf(false) }
     var showHeuristicSheet by remember { mutableStateOf(false) }
     var goalInputText by remember { mutableStateOf(dailyGoal.toString()) }
     val tripHistory by AutoAcceptService.tripHistory.collectAsStateWithLifecycle()
@@ -963,17 +977,28 @@ if (showGoalEditDialog) {
         )
     }
 
-    if (showPreferencesScreen) {
-        BackHandler {
-            showPreferencesScreen = false
+
+
+
+        
+        if (showChatbotScreen) {
+            androidx.activity.compose.BackHandler { showChatbotScreen = false }
+            com.example.ui.SupportChatbotScreen(
+                onNavigateBack = { showChatbotScreen = false }
+            )
+            return
         }
-        com.example.ui.PreferencesScreen(
-            onNavigateBack = { showPreferencesScreen = false }
-        )
-        return
-    }
+
+        if (showHelpScreen) {
+            androidx.activity.compose.BackHandler { showHelpScreen = false }
+            com.example.ui.HelpSupportScreen(
+                onNavigateBack = { showHelpScreen = false }
+            )
+            return
+        }
 
     Scaffold(
+
         topBar = {
             TopAppBar(
                 title = {
@@ -1044,16 +1069,7 @@ if (showGoalEditDialog) {
                     }
                 },
                 actions = {
-                    IconButton(
-                        onClick = { showPreferencesScreen = true },
-                        modifier = Modifier.testTag("topbar_preferences_button")
-                    ) {
-                        Icon(
-                            imageVector = Icons.Default.Tune,
-                            contentDescription = "Ride Preferences",
-                            tint = Cyan400
-                        )
-                    }
+
                     if (currentUser != null) {
                         val user = currentUser!!
                         Row(
@@ -2172,8 +2188,14 @@ if (showGoalEditDialog) {
         DebugLogsScreen(
             isAccessibilityEnabled = isAccessibilityEnabled,
             isNotificationListenerEnabled = isNotificationListenerEnabled,
-            onOpenAccessibility = { openAccessibilitySettings(context) },
-            onOpenNotificationListener = { openNotificationListenerSettings(context) }
+            onOpenAccessibility = {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                    showRestrictedGuide = true
+                } else {
+                    openAccessibilitySettings(context)
+                }
+            },
+            onOpenNotificationListener = { showNotificationGuide = true }
         )
     }
     4 -> {
@@ -2294,10 +2316,17 @@ if (showGoalEditDialog) {
             isNotificationListenerEnabled = isNotificationListenerEnabled,
             isBatteryOptimizationIgnored = isBatteryOptimizationIgnored,
             isOverlayAllowed = isOverlayAllowed,
-            onOpenAccessibility = { openAccessibilitySettings(context) },
-            onOpenNotificationListener = { openNotificationListenerSettings(context) },
+            onOpenAccessibility = {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                    showRestrictedGuide = true
+                } else {
+                    openAccessibilitySettings(context)
+                }
+            },
+            onOpenNotificationListener = { showNotificationGuide = true },
             onOpenBatteryOptimization = { openBatteryOptimizationSettings(context) },
-            onOpenOverlay = { openOverlaySettings(context) },
+            onOpenOverlay = { showOverlayGuide = true },
+            onOpenAutoStart = { showAutoStartGuide = true },
             onRefreshPermissions = {
                 isAccessibilityEnabled = isAccessibilityServiceEnabled(context, AutoAcceptService::class.java)
                 isNotificationListenerEnabled = isNotificationListenerEnabled(context)
@@ -2309,6 +2338,8 @@ if (showGoalEditDialog) {
                 updateInfoToPrompt = updateInfo
             },
             onOpenHeuristicSheet = { showHeuristicSheet = true },
+            onOpenHelpSupport = { showHelpScreen = true },
+            onOpenChatbot = { showChatbotScreen = true },
         )
     }
 }
@@ -2454,6 +2485,49 @@ if (showGoalEditDialog) {
         }
 
         // AI Price Heuristic Insights Bottom Sheet
+        
+        if (showRestrictedGuide) {
+            RestrictedSettingsGuideDialog(
+                onDismiss = { showRestrictedGuide = false },
+                onOpenAppInfo = {
+                    showRestrictedGuide = false
+                    openAppInfoSettings(context)
+                },
+                onOpenAccessibility = {
+                    showRestrictedGuide = false
+                    openAccessibilitySettings(context)
+                }
+            )
+        }
+        
+        if (showNotificationGuide) {
+            NotificationAccessGuideDialog(
+                onDismiss = { showNotificationGuide = false },
+                onProceed = {
+                    showNotificationGuide = false
+                    openNotificationListenerSettings(context)
+                }
+            )
+        }
+        if (showAutoStartGuide) {
+            AutoStartGuideDialog(
+                onDismiss = { showAutoStartGuide = false },
+                onProceed = {
+                    showAutoStartGuide = false
+                    openAutoStartSettings(context)
+                }
+            )
+        }
+        if (showOverlayGuide) {
+            DisplayOverlayGuideDialog(
+                onDismiss = { showOverlayGuide = false },
+                onProceed = {
+                    showOverlayGuide = false
+                    openOverlaySettings(context)
+                }
+            )
+        }
+
         if (showHeuristicSheet) {
             HeuristicInsightsBottomSheet(
                 onDismiss = { showHeuristicSheet = false },
@@ -2483,6 +2557,12 @@ fun HeuristicInsightsBottomSheet(
     onApplyRange: ((Float, Float) -> Unit)? = null
 ) {
     val context = LocalContext.current
+    var showHelpScreen by remember { mutableStateOf(false) }
+    var showChatbotScreen by remember { mutableStateOf(false) }
+    var showRestrictedGuide by remember { mutableStateOf(false) }
+    var showNotificationGuide by remember { mutableStateOf(false) }
+    var showAutoStartGuide by remember { mutableStateOf(false) }
+    var showOverlayGuide by remember { mutableStateOf(false) }
     val coroutineScope = rememberCoroutineScope()
     val rideDao = remember { AppDatabase.getDatabase(context).rideDao() }
     val records by rideDao.getAllRecordsFlow().collectAsStateWithLifecycle(initialValue = emptyList())
@@ -3559,12 +3639,21 @@ fun SettingsTabContent(
     onOpenNotificationListener: () -> Unit = {},
     onOpenBatteryOptimization: () -> Unit,
     onOpenOverlay: () -> Unit,
+    onOpenAutoStart: () -> Unit = {},
     onRefreshPermissions: () -> Unit,
     onUpdateAvailable: (GitHubUpdateManager.UpdateInfo) -> Unit,
     onOpenHeuristicSheet: () -> Unit = {},
+    onOpenHelpSupport: () -> Unit = {},
+    onOpenChatbot: () -> Unit = {},
     modifier: Modifier = Modifier
 ) {
     val context = LocalContext.current
+    var showHelpScreen by remember { mutableStateOf(false) }
+    var showChatbotScreen by remember { mutableStateOf(false) }
+    var showRestrictedGuide by remember { mutableStateOf(false) }
+    var showNotificationGuide by remember { mutableStateOf(false) }
+    var showAutoStartGuide by remember { mutableStateOf(false) }
+    var showOverlayGuide by remember { mutableStateOf(false) }
     val coroutineScope = rememberCoroutineScope()
     var isCheckingUpdates by remember { mutableStateOf(false) }
 
@@ -3980,7 +4069,7 @@ fun SettingsTabContent(
                         }
                         Spacer(modifier = Modifier.width(8.dp))
                         Button(
-                            onClick = { openAutoStartSettings(context) },
+                            onClick = onOpenAutoStart,
                             shape = RoundedCornerShape(10.dp),
                             colors = ButtonDefaults.buttonColors(
                                 containerColor = Cyan500,
@@ -5327,6 +5416,110 @@ fun SettingsTabContent(
                     }
                 }
             }
+
+        // =========================================================================
+        // HELP & SUPPORT CARD
+        // =========================================================================
+        Card(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clickable { onOpenHelpSupport() }
+                .padding(vertical = 8.dp)
+                .testTag("help_support_card"),
+            shape = RoundedCornerShape(22.dp),
+            colors = CardDefaults.cardColors(containerColor = Slate900),
+            border = BorderStroke(1.dp, Slate800)
+        ) {
+            Row(
+                modifier = Modifier.padding(18.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Surface(
+                    shape = CircleShape,
+                    color = Emerald400.copy(alpha = 0.15f),
+                    modifier = Modifier.size(48.dp)
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.SupportAgent,
+                        contentDescription = "Help & Support",
+                        tint = Emerald400,
+                        modifier = Modifier.padding(12.dp)
+                    )
+                }
+                Spacer(modifier = Modifier.width(16.dp))
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        text = "Help & Support",
+                        fontSize = 16.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = Color.White
+                    )
+                    Text(
+                        text = "FAQs, Troubleshooting & Automatic Guide",
+                        fontSize = 13.sp,
+                        color = Slate400
+                    )
+                }
+                Icon(
+                    imageVector = Icons.Default.ChevronRight,
+                    contentDescription = null,
+                    tint = Slate500
+                )
+            }
+        }
+
+        // =========================================================================
+        // AI HELP & SUPPORT CARD
+        // =========================================================================
+        Card(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clickable { onOpenChatbot() }
+                .padding(vertical = 8.dp)
+                .testTag("ai_support_card"),
+            shape = RoundedCornerShape(22.dp),
+            colors = CardDefaults.cardColors(containerColor = Slate900),
+            border = BorderStroke(1.dp, Slate800)
+        ) {
+            Row(
+                modifier = Modifier.padding(18.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Surface(
+                    shape = androidx.compose.foundation.shape.CircleShape,
+                    color = Cyan400.copy(alpha = 0.15f),
+                    modifier = Modifier.size(48.dp)
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.Chat,
+                        contentDescription = "AI Help & Support",
+                        tint = Cyan400,
+                        modifier = Modifier.padding(12.dp)
+                    )
+                }
+                Spacer(modifier = Modifier.width(16.dp))
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        text = "AI Help & Support",
+                        fontSize = 16.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = Color.White
+                    )
+                    Text(
+                        text = "Chat with our smart assistant 24/7",
+                        fontSize = 13.sp,
+                        color = Slate400
+                    )
+                }
+                Icon(
+                    imageVector = Icons.Default.ChevronRight,
+                    contentDescription = null,
+                    tint = Slate500
+                )
+            }
+        }
+
+
 
 
         }
