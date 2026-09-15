@@ -656,7 +656,7 @@ class AutoAcceptService : AccessibilityService(), TextToSpeech.OnInitListener {
         val DISTANCE_REGEX = Regex("""(\d+(?:\.\d+)?)\s*(?:km|kms)""", RegexOption.IGNORE_CASE)
 
         val PRICE_REGEX = Regex(
-            """(?:(?:₹|Rs\.?|INR)\s*(\d+(?:\.\d+)?)|(\d+(?:\.\d+)?)\s*(?:₹|Rs\.?|INR))""",
+            """(?:(?:₹|Rs\.?|INR|Earn|Fare)\s*(\d+(?:\.\d+)?)|(\d+(?:\.\d+)?)\s*(?:₹|Rs\.?|INR))""",
             RegexOption.IGNORE_CASE
         )
 
@@ -2068,7 +2068,7 @@ fun getCustomSoundUri(context: Context): String? {
         }
 
         // Strict early return if event does not originate from allowed Rapido packages
-        if (eventPackage != RAPIDO_CAPTAIN_PACKAGE) {
+        if (!ALLOWED_RAPIDO_PACKAGES.contains(eventPackage)) {
             return
         }
 
@@ -2145,7 +2145,7 @@ fun getCustomSoundUri(context: Context): String? {
 
             // STRICT CARD VALIDATION
             val cardTextCombined = cardTexts.joinToString(" ").lowercase()
-            val hasFareIndicator = Regex("(₹|rs|inr)").containsMatchIn(cardTextCombined)
+            val hasFareIndicator = Regex("(₹|rs|inr|earn|fare)").containsMatchIn(cardTextCombined)
             val hasDistanceIndicator = Regex("\\bkm\\b").containsMatchIn(cardTextCombined)
             if (!hasFareIndicator || !hasDistanceIndicator) {
                 continue
@@ -2155,6 +2155,7 @@ fun getCustomSoundUri(context: Context): String? {
             val parsedPrice = extractPrice(cardTexts)
 
             if (parsedPrice == null || parsedPrice <= 0f) {
+                Log.w(TAG, "Fare not detected on screen. Ignored to prevent fake clicks.")
                 continue // Skip: Real orders ALWAYS have a concrete fare amount!
             }
             
