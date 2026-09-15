@@ -2301,9 +2301,7 @@ if (showGoalEditDialog) {
             onUpdateAvailable = { updateInfo ->
                 updateInfoToPrompt = updateInfo
             },
-            onOpenPreferences = { showPreferencesScreen = true },
             onOpenHeuristicSheet = { showHeuristicSheet = true },
-            ignoredCount = totalIgnoredCount
         )
     }
 }
@@ -2976,14 +2974,6 @@ fun VisualLogViewCard(
         }
     }
 
-    val sessionEarnings = remember(serviceEvents) {
-        serviceEvents.filter { it.type == ServiceEventType.ORDER_ACCEPTED }
-            .mapNotNull { event ->
-                val match = Regex("₹([0-9]+)").find(event.description) ?: Regex("₹([0-9]+)").find(event.title)
-                match?.groupValues?.get(1)?.toIntOrNull()
-            }
-            .sum()
-    }
 
     val displayedEvents = if (isExpanded) filteredEvents else filteredEvents.take(5)
 
@@ -3564,15 +3554,12 @@ fun SettingsTabContent(
     onOpenOverlay: () -> Unit,
     onRefreshPermissions: () -> Unit,
     onUpdateAvailable: (GitHubUpdateManager.UpdateInfo) -> Unit,
-    onOpenPreferences: () -> Unit = {},
     onOpenHeuristicSheet: () -> Unit = {},
-    ignoredCount: Int,
     modifier: Modifier = Modifier
 ) {
     val context = LocalContext.current
     val coroutineScope = rememberCoroutineScope()
     var isCheckingUpdates by remember { mutableStateOf(false) }
-    var searchQuery by remember { mutableStateOf("") }
 
     var showDistanceInfo by remember { mutableStateOf(false) }
     var showPriceInfo by remember { mutableStateOf(false) }
@@ -4103,7 +4090,7 @@ fun SettingsTabContent(
         // =========================================================================
         SettingsSectionHeader("SMART FILTERS (PREMIUM)")
         
-        val q = searchQuery.lowercase()
+        val q = ""
         
         if (q.isEmpty() || "distance".contains(q) || "max pickup".contains(q) || "km".contains(q)) {
             // 2. DISTANCE FILTER CARD (PREMIUM FEATURE)
