@@ -636,6 +636,13 @@ fun AutoAcceptDashboardScreen(
                                 AutoAcceptService.setUserName(context, firstName)
                             }
                         }
+                        
+                        // Award Welcome Points on First Device Registration
+                        signedInUser?.uid?.let { uid ->
+                            coroutineScope.launch {
+                                com.example.SubscriptionManager.registerDeviceForWelcomePoints(uid, context)
+                            }
+                        }
 
                         (activity as? MainActivity)?.updateUiForPremiumStatus()
                         Toast.makeText(context, "Signed in as ${signedInUser?.displayName ?: signedInUser?.email ?: "User"}", Toast.LENGTH_SHORT).show()
@@ -1810,7 +1817,7 @@ if (showGoalEditDialog) {
                                                 val prefs = context.getSharedPreferences(AutoAcceptService.PREFS_NAME, Context.MODE_PRIVATE)
                                                 val durationMs = when (plan.planKey.lowercase()) {
                                                     "weekly" -> 7 * 24 * 3600 * 1000L
-                                                    "monthly" -> 30 * 24 * 3600 * 1000L
+                                                    "monthly" -> 28L * 24 * 3600 * 1000L
                                                     else -> 24 * 3600 * 1000L
                                                 }
                                                 val expiry = System.currentTimeMillis() + durationMs
@@ -1920,7 +1927,7 @@ if (showGoalEditDialog) {
                         }
                         val planDays = when (planKey.lowercase()) {
                             "weekly" -> 7
-                            "monthly" -> 30
+                            "monthly" -> 28
                             else -> 1
                         }
                         (context as? MainActivity)?.saveUtrToFirebase(
@@ -1943,7 +1950,7 @@ if (showGoalEditDialog) {
                                 val prefs = (context as? MainActivity)?.getSharedPreferences(AutoAcceptService.PREFS_NAME, Context.MODE_PRIVATE)
                                 val durationMs = when (planKey.lowercase()) {
                                     "weekly" -> 7 * 24 * 3600 * 1000L
-                                    "monthly" -> 30 * 24 * 3600 * 1000L
+                                    "monthly" -> 28L * 24 * 3600 * 1000L
                                     else -> 24 * 3600 * 1000L
                                 }
                                 val expiry = System.currentTimeMillis() + durationMs
@@ -4515,9 +4522,12 @@ fun SettingsTabContent(
                     Slider(
                         value = acceptDelayMs.toFloat(),
                         onValueChange = { value ->
-                            val rounded = (Math.round(value / 50.0) * 50).toLong()
-                            onAcceptDelayChange(rounded)
+                            if (isPassActive) {
+                                val rounded = (Math.round(value / 50.0) * 50).toLong()
+                                onAcceptDelayChange(rounded)
+                            }
                         },
+                        enabled = isPassActive,
                         valueRange = 0f..3000f,
                         steps = 59, // step of 50ms (3000 / 50 - 1)
                         colors = SliderDefaults.colors(
@@ -4544,7 +4554,8 @@ fun SettingsTabContent(
                                     1.dp,
                                     if (isSelected) Cyan400 else Slate700
                                 ),
-                                onClick = { onAcceptDelayChange(presetMs) },
+                                onClick = { if (isPassActive) onAcceptDelayChange(presetMs) },
+                                enabled = isPassActive,
                                 modifier = Modifier
                                     .weight(1f)
                                     .testTag("preset_delay_${presetMs}ms")
@@ -5020,8 +5031,9 @@ fun SettingsTabContent(
                         )
                     }
                     Switch(
-                        checked = isRapidoOnly,
-                        onCheckedChange = onRapidoOnlyChange,
+                        checked = isRapidoOnly && isPassActive,
+                        onCheckedChange = { if(isPassActive) onRapidoOnlyChange(it) },
+                        enabled = isPassActive,
                         colors = SwitchDefaults.colors(
                             checkedThumbColor = Color.White,
                             checkedTrackColor = Emerald500,

@@ -342,7 +342,7 @@ object SubscriptionManager {
             val (durationMs, requiredPrice) = when (plan.lowercase()) {
                 "daily" -> Pair(24 * 3600 * 1000L, 9)
                 "weekly" -> Pair(7 * 24 * 3600 * 1000L, 49)
-                "monthly" -> Pair(30 * 24 * 3600 * 1000L, 179)
+                "monthly" -> Pair(28L * 24 * 3600 * 1000L, 179)
                 else -> Pair(24 * 3600 * 1000L, 9)
             }
 
@@ -501,7 +501,7 @@ object SubscriptionManager {
             val now = System.currentTimeMillis()
             val durationMs = when (plan.lowercase()) {
                 "weekly" -> 7 * 24 * 3600 * 1000L
-                "monthly" -> 30 * 24 * 3600 * 1000L
+                "monthly" -> 28L * 24 * 3600 * 1000L
                 else -> 24 * 3600 * 1000L // daily = 24h
             }
 
@@ -574,6 +574,70 @@ object SubscriptionManager {
      * - Sets "referredBy" and "referralAppliedAt" on the user's document to prevent re-application.
      * - Records the referral log in "user_referrals" collection for auditing.
      */
+    /**
+     * New Device Registration (50 Points):
+     * - Checks devices/$androidId document
+     * - If not exists, creates it with 50 points and awards 50 points to the user.
+     */
+    suspend fun registerDeviceForWelcomePoints(userId: String, context: Context): Result<String> {
+        return try {
+            if (userId.isBlank()) return Result.failure(IllegalArgumentException("Invalid user ID."))
+            val deviceId = android.provider.Settings.Secure.getString(context.contentResolver, android.provider.Settings.Secure.ANDROID_ID) ?: "UNKNOWN_DEVICE"
+            
+            val firestore = try {
+                FirebaseFirestore.getInstance()
+            } catch (e: Exception) {
+                FirebaseHelper.initialize(context)
+                FirebaseFirestore.getInstance()
+            }
+            
+            val deviceRef = firestore.collection("devices").document(deviceId)
+            val userRef = firestore.collection(COLLECTION_SUBSCRIPTIONS).document(userId)
+
+            var awarded = false
+
+            firestore.runTransaction { transaction ->
+                val deviceSnap = transaction.get(deviceRef)
+                if (!deviceSnap.exists()) {
+                    // Create device doc with 50 points
+                    transaction.set(deviceRef, mapOf(
+                        "points" to 50,
+                        "registeredAt" to com.google.firebase.firestore.FieldValue.serverTimestamp(),
+                        "claimedByUid" to userId
+                    ))
+
+                    // Credit 50 Welcome Points to user
+                    val userSnap = transaction.get(userRef)
+                    val currentPoints = if (userSnap.exists()) {
+                        userSnap.getLong("points")?.toInt() ?: 0
+                    } else {
+                        0
+                    }
+                    
+                    transaction.set(
+                        userRef,
+                        mapOf(
+                            "userId" to userId,
+                            "points" to currentPoints + 50,
+                            "referralCode" to getReferralCodeForUser(userId)
+                        ),
+                        com.google.firebase.firestore.SetOptions.merge()
+                    )
+                    awarded = true
+                }
+            }.await()
+            
+            if (awarded) {
+                Result.success("50 Welcome Points awarded!")
+            } else {
+                Result.success("Device already registered.")
+            }
+        } catch (e: Exception) {
+            if (e is kotlinx.coroutines.CancellationException) throw e
+            Result.failure(e)
+        }
+    }
+
     suspend fun applyReferralCode(
         currentUserId: String,
         referralCodeInput: String,
@@ -665,7 +729,7 @@ object SubscriptionManager {
             firestore.runTransaction { transaction ->
                 val deviceSnapshot = transaction.get(deviceRef)
                 if (deviceSnapshot.exists()) {
-                    throw IllegalStateException("This device has already claimed a referral bonus.")
+                    throw IllegalStateException("Is phone par referral code pehle se use ho chuka hai.")
                 }
 
                 val userSnapshot = transaction.get(userRef)
@@ -677,38 +741,31 @@ object SubscriptionManager {
                 }
 
                 val referrerSnapshot = transaction.get(referrerRef)
-                val currentReferrerPoints = if (referrerSnapshot.exists()) {
-                    referrerSnapshot.getLong("points")?.toInt() ?: 0
-                } else {
-                    0
-                }
-
-                val currentUserPoints = if (userSnapshot.exists()) {
-                    userSnapshot.getLong("points")?.toInt() ?: WELCOME_BONUS_POINTS
-                } else {
-                    WELCOME_BONUS_POINTS
+                val referrerDeviceId = referrerSnapshot.getString("activeDeviceId")
+                
+                // Self-referral protection: Referrer ka device ID aur user ka device ID same nahi hona chahiye
+                if (referrerDeviceId != null && referrerDeviceId == deviceId) {
+                    throw IllegalStateException("You cannot refer your own device.")
                 }
 
                 // Award 20 Points to Referrer
-                val newReferrerPoints = currentReferrerPoints + REFERRAL_BONUS_REFERRER
                 transaction.set(
                     referrerRef,
                     mapOf(
                         "userId" to referrerDocId,
-                        "points" to newReferrerPoints,
+                        "points" to com.google.firebase.firestore.FieldValue.increment(20L),
                         "referralCode" to getReferralCodeForUser(referrerDocId),
-                        "totalReferrals" to ((referrerSnapshot.getLong("totalReferrals") ?: 0L) + 1L)
+                        "totalReferrals" to com.google.firebase.firestore.FieldValue.increment(1L)
                     ),
                     SetOptions.merge()
                 )
 
                 // Award 50 Points to New User (in addition to welcome bonus)
-                val newUserPoints = currentUserPoints + REFERRAL_BONUS_NEW_USER
                 transaction.set(
                     userRef,
                     mapOf(
                         "userId" to currentUserId,
-                        "points" to newUserPoints,
+                        "points" to com.google.firebase.firestore.FieldValue.increment(50L),
                         "referralCode" to getReferralCodeForUser(currentUserId),
                         "referredBy" to referrerDocId,
                         "referralCodeUsed" to cleanCode,
@@ -724,8 +781,8 @@ object SubscriptionManager {
                         "referrerUserId" to referrerDocId,
                         "referredUserId" to currentUserId,
                         "referralCode" to cleanCode,
-                        "referrerBonusPoints" to REFERRAL_BONUS_REFERRER,
-                        "newUserBonusPoints" to REFERRAL_BONUS_NEW_USER,
+                        "referrerBonusPoints" to 20,
+                        "newUserBonusPoints" to 50,
                         "timestamp" to now
                     )
                 )

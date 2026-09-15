@@ -268,7 +268,7 @@ fun ProfileEarningsTabContent(
         listOf(
             PlanOption("daily", "Daily", "24 Hours", 9, SubscriptionManager.POINTS_DAILY_PASS, null),
             PlanOption("weekly", "Weekly", "7 Days", 49, SubscriptionManager.POINTS_WEEKLY_PASS, "POPULAR"),
-            PlanOption("monthly", "Monthly", "30 Days", 179, SubscriptionManager.POINTS_MONTHLY_PASS, "SAVE 35%")
+            PlanOption("monthly", "Monthly", "28 Days", 179, SubscriptionManager.POINTS_MONTHLY_PASS, "SAVE 35%")
         )
     }
 
@@ -444,7 +444,7 @@ fun ProfileEarningsTabContent(
                                         val prefs = (context as? MainActivity)?.getSharedPreferences(AutoAcceptService.PREFS_NAME, Context.MODE_PRIVATE)
                                         val durationMs = when (plan.planKey.lowercase()) {
                                             "weekly" -> 7 * 24 * 3600 * 1000L
-                                            "monthly" -> 30 * 24 * 3600 * 1000L
+                                            "monthly" -> 28L * 24 * 3600 * 1000L
                                             else -> 24 * 3600 * 1000L
                                         }
                                         val expiry = System.currentTimeMillis() + durationMs
@@ -554,7 +554,7 @@ fun ProfileEarningsTabContent(
                 }
                 val planDays = when (planKey.lowercase()) {
                     "weekly" -> 7
-                    "monthly" -> 30
+                    "monthly" -> 28
                     else -> 1
                 }
                 (context as? MainActivity)?.saveUtrToFirebase(
@@ -577,7 +577,7 @@ fun ProfileEarningsTabContent(
                         val prefs = (context as? MainActivity)?.getSharedPreferences(AutoAcceptService.PREFS_NAME, Context.MODE_PRIVATE)
                         val durationMs = when (planKey.lowercase()) {
                             "weekly" -> 7 * 24 * 3600 * 1000L
-                            "monthly" -> 30 * 24 * 3600 * 1000L
+                            "monthly" -> 28L * 24 * 3600 * 1000L
                             else -> 24 * 3600 * 1000L
                         }
                         val expiry = System.currentTimeMillis() + durationMs

@@ -2195,9 +2195,9 @@ fun getCustomSoundUri(context: Context): String? {
             val acceptReason: String
 
             if (!isPremium) {
-                delayMs = configuredDelay.coerceAtLeast(500L)
-                acceptReason = "Auto-Accepted (Free Mode - ${delayMs}ms Delay)"
-                Log.d(TAG, "Free Mode active: Skipping filters, queued with ${delayMs}ms delay")
+                delayMs = 1500L
+                acceptReason = "Auto-Accepted (Free Mode - 1.5s Delay)"
+                Log.d(TAG, "Free Mode active: Skipping all filters and custom delay.")
             } else {
                 delayMs = configuredDelay
 
@@ -2431,7 +2431,7 @@ fun getCustomSoundUri(context: Context): String? {
                         return@launch
                     }
 
-                    if (isVoiceOnlyMode(this@AutoAcceptService)) {
+                    if (isPremium && isVoiceOnlyMode(this@AutoAcceptService)) {
                         lastClickTimestamp = SystemClock.uptimeMillis()
                         isGenuineOrderIncoming = false
                         notificationResetJob?.cancel()
