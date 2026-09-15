@@ -616,20 +616,7 @@ class AutoAcceptService : AccessibilityService(), TextToSpeech.OnInitListener {
 
         // Contextual tokens indicating an active incoming ride overlay
         val RIDE_CONTEXT_INDICATORS = listOf(
-            "Pickup",
-            "Pick up",
-            "Drop",
-            "Drop off",
-            "₹",
-            "Rs",
-            "INR",
-            "km",
-            "KM",
-            "Distance",
-            "Fare",
-            "Earnings",
-            "Est. Fare",
-            "Captain Fare"
+            "Pickup", "Pick up", "Drop", "Drop off", "₹", "Rs", "INR", "km", "KM", "Distance", "Fare", "Earnings", "Est. Fare", "Captain Fare"
         )
 
         val ACCEPT_BUTTON_KEYWORDS = listOf(
@@ -2155,7 +2142,7 @@ fun getCustomSoundUri(context: Context): String? {
             val parsedPrice = extractPrice(cardTexts)
 
             if (parsedPrice == null || parsedPrice <= 0f) {
-                Log.w(TAG, "Fare not detected on screen. Ignored to prevent fake clicks.")
+                Log.w(TAG, "Fare not detected (Parsed: ${parsedPrice}). Ignored to prevent fake clicks.")
                 continue // Skip: Real orders ALWAYS have a concrete fare amount!
             }
             
