@@ -642,10 +642,7 @@ class AutoAcceptService : AccessibilityService(), TextToSpeech.OnInitListener {
         // Regex patterns for distance and price
         val DISTANCE_REGEX = Regex("""(\d+(?:\.\d+)?)\s*(?:km|kms)""", RegexOption.IGNORE_CASE)
 
-        val PRICE_REGEX = Regex(
-            """(?:(?:₹|Rs\.?|INR|Earn|Fare)\s*(\d+(?:\.\d+)?)|(\d+(?:\.\d+)?)\s*(?:₹|Rs\.?|INR))""",
-            RegexOption.IGNORE_CASE
-        )
+        val PRICE_REGEX = Regex("""(?:(?:₹|Rs\.?|INR|Earn|Fare)\s*(\d+(?:\.\d+)?)|(\d+(?:\.\d+)?)\s*(?:₹|Rs\.?|INR))""", RegexOption.IGNORE_CASE)
 
         // Duplicate accept prevention cache: ride signature -> last accepted timestamp (Requirement 7)
         private val recentlyAcceptedRides = ConcurrentHashMap<String, Long>()
@@ -1336,10 +1333,7 @@ fun getCustomSoundUri(context: Context): String? {
 
         fun extractDistance(texts: List<String>): Float? {
             for (text in texts) {
-                if (text.contains("pickup", ignoreCase = true) ||
-                    text.contains("away", ignoreCase = true) ||
-                    text.contains("pick up", ignoreCase = true)
-                ) {
+                if (text.contains("pickup", ignoreCase = true) || text.contains("away", ignoreCase = true) || text.contains("pick up", ignoreCase = true)) {
                     val match = DISTANCE_REGEX.find(text)
                     if (match != null) {
                         val valueStr = match.groupValues.getOrNull(1)
@@ -1348,13 +1342,22 @@ fun getCustomSoundUri(context: Context): String? {
                     }
                 }
             }
-
             for (text in texts) {
                 val match = DISTANCE_REGEX.find(text)
                 if (match != null) {
                     val valueStr = match.groupValues.getOrNull(1)
                     val value = valueStr?.toFloatOrNull()
                     if (value != null) return value
+                }
+            }
+            // Handle Split UI Nodes (Number and "km" in different nodes)
+            for ((index, text) in texts.withIndex()) {
+                val dist = text.trim().toFloatOrNull()
+                if (dist != null) {
+                    val nextText = texts.getOrNull(index + 1)?.lowercase()?.trim()
+                    if (nextText == "km" || nextText == "kms") {
+                        return dist
+                    }
                 }
             }
             return null
@@ -1367,6 +1370,15 @@ fun getCustomSoundUri(context: Context): String? {
                     val str1 = match.groupValues.getOrNull(1)?.takeIf { it.isNotEmpty() }
                     val str2 = match.groupValues.getOrNull(2)?.takeIf { it.isNotEmpty() }
                     val price = (str1 ?: str2)?.toFloatOrNull()
+                    if (price != null) return price
+                }
+            }
+            // Handle Split UI Nodes (Currency and Amount in different nodes)
+            for ((index, text) in texts.withIndex()) {
+                val lower = text.lowercase().trim()
+                if (lower == "₹" || lower == "rs" || lower == "inr" || lower == "rs." || lower == "fare" || lower == "earn") {
+                    val nextText = texts.getOrNull(index + 1)?.replace(",", "")?.trim()
+                    val price = nextText?.toFloatOrNull()
                     if (price != null) return price
                 }
             }
@@ -2023,76 +2035,63 @@ fun getCustomSoundUri(context: Context): String? {
 
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
         if (event == null) return
+        if (!isAutomationEnabled(this)) return
 
-        // 1. MASTER SWITCH: Stop immediately if master auto-accept is turned off (Requirement 6)
-        if (!isAutomationEnabled(this)) {
-            return
-        }
-
-// SAFETY CHECK: If flag has been stuck for > 5s, auto-reset
         if (isGenuineOrderIncoming && System.currentTimeMillis() - genuineOrderIncomingTimestamp > 5000L) {
-            Log.w(TAG, "onAccessibilityEvent: isGenuineOrderIncoming flag was stuck > 5s. Auto-resetting.")
             isGenuineOrderIncoming = false
         }
-        // 2. OVERLAY EVENT LISTENER & TARGET PACKAGE LOCK:
-        // Prioritize overlay and state transition events: TYPE_WINDOW_STATE_CHANGED and TYPE_WINDOW_CONTENT_CHANGED
+
         val eventType = event.eventType
-        if (eventType != AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED &&
-            eventType != AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED
-        ) {
+        if (eventType != AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED && eventType != AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED) {
             return
         }
 
         val eventPackage = event.packageName?.toString() ?: ""
-
-        if (eventPackage.isEmpty() ||
-            eventPackage == packageName ||
-            eventPackage == "android" ||
-            eventPackage == "com.android.systemui" ||
-            eventPackage == "com.google.android.apps.maps"
-        ) {
+        if (eventPackage.isEmpty() || eventPackage == packageName || eventPackage == "com.android.systemui" || eventPackage == "com.google.android.apps.maps") {
             return
         }
 
-        // Strict early return if event does not originate from allowed Rapido packages
-        if (!ALLOWED_RAPIDO_PACKAGES.contains(eventPackage)) {
+        val isRapidoEvent = ALLOWED_RAPIDO_PACKAGES.contains(eventPackage)
+        if (!isRapidoEvent && !isGenuineOrderIncoming) {
             return
         }
 
-        // 3. DEBOUNCE COOLDOWN
         val now = SystemClock.uptimeMillis()
-        if (now - lastClickTimestamp < CLICK_COOLDOWN_MS) {
-            return
-        }
-
-        if (now - lastScanTimestamp < 1000L) return
+        if (now - lastClickTimestamp < CLICK_COOLDOWN_MS) return
+        if (now - lastScanTimestamp < 200L) return // Sped up to 200ms
         lastScanTimestamp = now
 
-        // 4. FIND TRUE ROOT OF EVENT'S WINDOW:
-        // Safely ascends to the root of the event's window while blocking background apps
+        val rapidoRoots = mutableListOf<AccessibilityNodeInfo>()
+        try {
+            val activeWindows = windows
+            if (activeWindows != null) {
+                for (window in activeWindows) {
+                    val root = window.root
+                    val pkg = root?.packageName?.toString()
+                    if (pkg != null && ALLOWED_RAPIDO_PACKAGES.contains(pkg)) {
+                        rapidoRoots.add(root)
+                    }
+                }
+            }
+        } catch (e: Exception) {}
+
         var windowRoot = try { event.source } catch (e: Exception) { null }
         while (windowRoot?.parent != null) {
             windowRoot = windowRoot.parent
         }
-        val targetNode = windowRoot ?: try {
-            rootInActiveWindow
-        } catch (e: Exception) {
-            Log.w(TAG, "Cannot access root window: ${e.message}")
-            null
-        } ?: return
-
-        val nodePackage = targetNode.packageName?.toString() ?: eventPackage
-        if (nodePackage == "com.google.android.apps.maps" || nodePackage == "com.android.systemui") {
-            return
-        }
-        if (nodePackage != RAPIDO_CAPTAIN_PACKAGE) {
-            return
+        val sourcePkg = windowRoot?.packageName?.toString() ?: eventPackage
+        if (windowRoot != null && ALLOWED_RAPIDO_PACKAGES.contains(sourcePkg) && !rapidoRoots.contains(windowRoot)) {
+            rapidoRoots.add(windowRoot)
         }
 
-        try {
-            processActiveWindow(targetNode, if (nodePackage.isNotEmpty()) nodePackage else eventPackage)
-        } catch (e: Exception) {
-            Log.e(TAG, "Error evaluating active window/source: ${e.message}", e)
+        if (rapidoRoots.isEmpty()) return
+
+        for (root in rapidoRoots) {
+            try {
+                processActiveWindow(root, root.packageName?.toString() ?: eventPackage)
+            } catch (e: Exception) {
+                Log.e(TAG, "Error evaluating active window: ${e.message}", e)
+            }
         }
     }
 
@@ -2131,13 +2130,6 @@ fun getCustomSoundUri(context: Context): String? {
             val cardTexts = extractAllScreenTexts(this, cardContainer)
 
             // STRICT CARD VALIDATION
-            val cardTextCombined = cardTexts.joinToString(" ").lowercase()
-            val hasFareIndicator = Regex("(₹|rs|inr|earn|fare)").containsMatchIn(cardTextCombined)
-            val hasDistanceIndicator = Regex("\\bkm\\b").containsMatchIn(cardTextCombined)
-            if (!hasFareIndicator || !hasDistanceIndicator) {
-                continue
-            }
-
             val parsedDistance = extractDistance(cardTexts)
             val parsedPrice = extractPrice(cardTexts)
 
