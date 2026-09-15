@@ -593,6 +593,18 @@ object SubscriptionManager {
                 return Result.failure(IllegalArgumentException("You cannot use your own referral code."))
             }
 
+            if (context == null) {
+                return Result.failure(IllegalArgumentException("Context is required for device verification."))
+            }
+
+            val deviceId = android.provider.Settings.Secure.getString(context.contentResolver, android.provider.Settings.Secure.ANDROID_ID) ?: "UNKNOWN_DEVICE"
+            val sharedPrefs = context.getSharedPreferences("subscription_prefs", Context.MODE_PRIVATE)
+            val isClaimedLocally = sharedPrefs.getBoolean("KEY_REFERRAL_CLAIMED_ON_DEVICE", false)
+
+            if (isClaimedLocally) {
+                return Result.failure(IllegalStateException("This device has already claimed a referral bonus."))
+            }
+
             val firebaseApp = try {
                 if (context != null) {
                     FirebaseHelper.initialize(context)
@@ -648,8 +660,14 @@ object SubscriptionManager {
             val userRef = firestore.collection(COLLECTION_SUBSCRIPTIONS).document(currentUserId)
             val referrerRef = firestore.collection(COLLECTION_SUBSCRIPTIONS).document(referrerDocId)
             val referralLogRef = firestore.collection(COLLECTION_REFERRALS).document("${referrerDocId}_$currentUserId")
+            val deviceRef = firestore.collection("claimed_referral_devices").document(deviceId)
 
             firestore.runTransaction { transaction ->
+                val deviceSnapshot = transaction.get(deviceRef)
+                if (deviceSnapshot.exists()) {
+                    throw IllegalStateException("This device has already claimed a referral bonus.")
+                }
+
                 val userSnapshot = transaction.get(userRef)
                 if (userSnapshot.exists()) {
                     val existingReferrer = userSnapshot.getString("referredBy")
@@ -711,7 +729,19 @@ object SubscriptionManager {
                         "timestamp" to now
                     )
                 )
+                
+                transaction.set(
+                    deviceRef,
+                    hashMapOf(
+                        "deviceId" to deviceId,
+                        "claimedByUid" to currentUserId,
+                        "referralCodeUsed" to cleanCode,
+                        "timestamp" to com.google.firebase.firestore.FieldValue.serverTimestamp()
+                    )
+                )
             }.await()
+            
+            sharedPrefs.edit().putBoolean("KEY_REFERRAL_CLAIMED_ON_DEVICE", true).apply()
 
             Log.i(TAG, "Referral applied successfully: $currentUserId referred by $referrerDocId (+20 to referrer, +50 to new user)")
             Result.success("🎉 Referral Applied! You earned 50 Points and your friend earned 20 Points!")

@@ -611,6 +611,9 @@ fun ProfileEarningsTabContent(
 
     // Apply Referral Code Dialog
     if (showReferralDialog) {
+        val sharedPrefs = context.getSharedPreferences("subscription_prefs", android.content.Context.MODE_PRIVATE)
+        val isDeviceClaimed = sharedPrefs.getBoolean("KEY_REFERRAL_CLAIMED_ON_DEVICE", false)
+        
         AlertDialog(
             onDismissRequest = {
                 if (!isApplyingReferral) showReferralDialog = false
@@ -661,11 +664,18 @@ fun ProfileEarningsTabContent(
                             fontSize = 12.sp,
                             color = Amber400
                         )
+                    } else if (isDeviceClaimed) {
+                        Text(
+                            text = "⚠️ Referral bonus already claimed on this device.",
+                            fontSize = 12.sp,
+                            color = Amber400
+                        )
                     }
                 }
             },
             confirmButton = {
                 Button(
+                    enabled = !isApplyingReferral && !isDeviceClaimed,
                     onClick = {
                         val uid = currentUser?.uid
                         if (uid.isNullOrBlank()) {
@@ -695,7 +705,6 @@ fun ProfileEarningsTabContent(
                             }
                         }
                     },
-                    enabled = !isApplyingReferral,
                     shape = RoundedCornerShape(12.dp),
                     colors = ButtonDefaults.buttonColors(
                         containerColor = Amber400,
@@ -717,7 +726,6 @@ fun ProfileEarningsTabContent(
             dismissButton = {
                 OutlinedButton(
                     onClick = { showReferralDialog = false },
-                    enabled = !isApplyingReferral,
                     shape = RoundedCornerShape(12.dp),
                     colors = ButtonDefaults.outlinedButtonColors(contentColor = Slate400)
                 ) {
