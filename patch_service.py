@@ -3,44 +3,48 @@ import re
 with open("app/src/main/java/com/example/AutoAcceptService.kt", "r") as f:
     content = f.read()
 
-# 1. PRICE_REGEX
-old_price_regex = r"""        val PRICE_REGEX = Regex\(
-            \"\"\"(?:\(?:₹\|Rs\.\\?\|INR\)\\s\*\(\\d\+\(?:\\.\\d\+\)\?\)\|\(\\d\+\(?:\\.\\d\+\)\?\)\\s\*(?:₹\|Rs\.\\?\|INR)\)\"\"\",
-            RegexOption\.IGNORE_CASE
-        \)"""
+# 1. Update RideData
+ride_data_old = """data class RideData(
+    val price: Float?,
+    val distanceKm: Float?,
+    val passengerRating: Float?,
+    val pickup: String,
+    val drop: String,
+    val sourcePackage: String,
+    val signature: String,
+    val isPremium: Boolean,
+    val delayMs: Long
+)"""
+ride_data_new = """data class RideData(
+    val price: Float?,
+    val distanceKm: Float?,
+    val passengerRating: Float?,
+    val pickup: String?,
+    val drop: String?,
+    val sourcePackage: String,
+    val signature: String,
+    val isPremium: Boolean,
+    val delayMs: Long
+)"""
+content = content.replace(ride_data_old, ride_data_new)
 
-new_price_regex = """        val PRICE_REGEX = Regex(
-            \"\"\"(?:(?:₹|Rs\\.?|INR|Earn|Fare)\\s*(\\d+(?:\\.\\d+)?)|(\\d+(?:\\.\\d+)?)\\s*(?:₹|Rs\\.?|INR))\"\"\",
-            RegexOption.IGNORE_CASE
-        )"""
-content = re.sub(old_price_regex, new_price_regex, content)
-# Try direct replacement if regex fails
-if "val PRICE_REGEX = Regex(\n            \"\"\"(?:(?:₹|Rs\\.?|INR)\\s*(\\d+(?:\\.\\d+)?)|(\\d+(?:\\.\\d+)?)\\s*(?:₹|Rs\\.?|INR))\"\"\"," in content:
-    content = content.replace("val PRICE_REGEX = Regex(\n            \"\"\"(?:(?:₹|Rs\\.?|INR)\\s*(\\d+(?:\\.\\d+)?)|(\\d+(?:\\.\\d+)?)\\s*(?:₹|Rs\\.?|INR))\"\"\",", "val PRICE_REGEX = Regex(\n            \"\"\"(?:(?:₹|Rs\\.?|INR|Earn|Fare)\\s*(\\d+(?:\\.\\d+)?)|(\\d+(?:\\.\\d+)?)\\s*(?:₹|Rs\\.?|INR))\"\"\",")
-
-# 2. hasFareIndicator
-content = content.replace(
-    'val hasFareIndicator = Regex("(₹|rs|inr)").containsMatchIn(cardTextCombined)',
-    'val hasFareIndicator = Regex("(₹|rs|inr|earn|fare)").containsMatchIn(cardTextCombined)'
-)
-
-# 3. eventPackage check
-content = content.replace(
-    "if (eventPackage != RAPIDO_CAPTAIN_PACKAGE) {",
-    "if (!ALLOWED_RAPIDO_PACKAGES.contains(eventPackage)) {"
-)
-
-# 4. Debug warning
-old_parsed_price = """            if (parsedPrice == null || parsedPrice <= 0f) {
-                continue // Skip: Real orders ALWAYS have a concrete fare amount!
-            }"""
-
-new_parsed_price = """            if (parsedPrice == null || parsedPrice <= 0f) {
-                Log.w(TAG, "Fare not detected on screen. Ignored to prevent fake clicks.")
-                continue // Skip: Real orders ALWAYS have a concrete fare amount!
-            }"""
-
-content = content.replace(old_parsed_price, new_parsed_price)
+# 2. Update generateRideSignature
+sig_old = """        fun generateRideSignature(sourcePackage: String, price: Float?, distanceKm: Float?, pickup: String, drop: String): String {
+            val p = price?.toInt()?.toString() ?: "any_fare"
+            val d = distanceKm?.let { String.format(Locale.US, "%.1f", it) } ?: "any_dist"
+            val pick = pickup.trim().lowercase().take(30)
+            val drp = drop.trim().lowercase().take(30)
+            return "$sourcePackage#$p#$d#$pick#$drp"
+        }"""
+sig_new = """        fun generateRideSignature(sourcePackage: String, price: Float?, distanceKm: Float?, rating: Float?, pickup: String?, drop: String?): String {
+            val p = price?.let { String.format(Locale.US, "%.1f", it) } ?: "null_fare"
+            val d = distanceKm?.let { String.format(Locale.US, "%.1f", it) } ?: "null_dist"
+            val r = rating?.let { String.format(Locale.US, "%.1f", it) } ?: "null_rating"
+            val pick = pickup?.trim()?.lowercase()?.take(30) ?: "null_pickup"
+            val drp = drop?.trim()?.lowercase()?.take(30) ?: "null_drop"
+            return "$sourcePackage#$p#$d#$r#$pick#$drp"
+        }"""
+content = content.replace(sig_old, sig_new)
 
 with open("app/src/main/java/com/example/AutoAcceptService.kt", "w") as f:
     f.write(content)

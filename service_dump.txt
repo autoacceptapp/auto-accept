@@ -39,8 +39,6 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.sync.Mutex
-import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.tasks.await
 import kotlinx.coroutines.withContext
@@ -148,24 +146,6 @@ data class RideLogItem(
  * 3. Accept All Override: If Master Switch is ON but ALL individual filters are OFF, accepts any order.
  * 4. Voice Announcer (Text-To-Speech): Parses screen data and announces details dynamically.
  */
-data class RideData(
-    val price: Float?,
-    val distanceKm: Float?,
-    val passengerRating: Float?,
-    val pickup: String?,
-    val drop: String?,
-    val sourcePackage: String,
-    val signature: String,
-    val isPremium: Boolean,
-    val delayMs: Long
-)
-
-data class FilterDecision(
-    val passed: Boolean,
-    val reason: String,
-    val failedFilter: String? = null
-)
-
 class AutoAcceptService : AccessibilityService(), TextToSpeech.OnInitListener {
 
     private var lastClickTimestamp: Long = 0
@@ -183,7 +163,6 @@ class AutoAcceptService : AccessibilityService(), TextToSpeech.OnInitListener {
     @Volatile
     private var cpuWakeLock: PowerManager.WakeLock? = null
     private val wakeLockMutex = Any()
-    private val acceptMutex = Mutex()
 
     /**
      * Acquires a PARTIAL_WAKE_LOCK to ensure the device CPU remains active and prevents
@@ -691,13 +670,12 @@ class AutoAcceptService : AccessibilityService(), TextToSpeech.OnInitListener {
             }
         }
 
-        fun generateRideSignature(sourcePackage: String, price: Float?, distanceKm: Float?, rating: Float?, pickup: String?, drop: String?): String {
-            val p = price?.let { String.format(Locale.US, "%.1f", it) } ?: "null_fare"
-            val d = distanceKm?.let { String.format(Locale.US, "%.1f", it) } ?: "null_dist"
-            val r = rating?.let { String.format(Locale.US, "%.1f", it) } ?: "null_rating"
-            val pick = pickup?.trim()?.lowercase()?.take(30) ?: "null_pickup"
-            val drp = drop?.trim()?.lowercase()?.take(30) ?: "null_drop"
-            return "$sourcePackage#$p#$d#$r#$pick#$drp"
+        fun generateRideSignature(sourcePackage: String, price: Float?, distanceKm: Float?, pickup: String, drop: String): String {
+            val p = price?.toInt()?.toString() ?: "any_fare"
+            val d = distanceKm?.let { String.format(Locale.US, "%.1f", it) } ?: "any_dist"
+            val pick = pickup.trim().lowercase().take(30)
+            val drp = drop.trim().lowercase().take(30)
+            return "$sourcePackage#$p#$d#$pick#$drp"
         }
 
         fun cancelPendingAccept(reason: String = "Operation cancelled") {
@@ -724,10 +702,10 @@ class AutoAcceptService : AccessibilityService(), TextToSpeech.OnInitListener {
                 return true
             }
 
-            val pattern = Regex("""^(?:swipe\s+to\s+accept|accept(?:\s+(?:order|ride))?|take\s+(?:order|ride)|confirm(?:\s+order)?)(?:\s*[\(>→»\d\w\s]*)?$""", RegexOption.IGNORE_CASE)
+            val pattern = Regex("""^(?:swipe\s+to\s+accept|accept(?:\s+(?:order|ride))?|take\s+order|confirm\s+order|go|chalo|shuru|yes)(?:\s*[\(>→»\d\w\s]*)?$""", RegexOption.IGNORE_CASE)
             if (pattern.matches(text)) return true
 
-            val fuzzyRootPattern = Regex("""\b(?:accept|swipe|take|confirm)\b""", RegexOption.IGNORE_CASE)
+            val fuzzyRootPattern = Regex("""\b(?:accept|swipe|take|confirm|go|chalo|shuru|yes)\b""", RegexOption.IGNORE_CASE)
             return fuzzyRootPattern.containsMatchIn(text)
         }
 
@@ -2132,168 +2110,260 @@ fun getCustomSoundUri(context: Context): String? {
         manager.notify(ALERT_NOTIFICATION_ID, builder.build())
     }
 
-        private fun evaluateRideAgainstFilters(context: Context, ride: RideData): FilterDecision {
-        val isBlacklistFilterOn = isBlacklistEnabled(context)
-        val isDistanceFilterOn = isDistanceFilterEnabled(context)
-        val isPriceFilterOn = isPriceFilterEnabled(context)
-        val isRatingFilterOn = isPassengerRatingFilterEnabled(context)
-        
-        if (isDistanceFilterOn) {
-            val maxDistance = getMaxDistanceKm(context)
-            if (ride.distanceKm == null) {
-                return FilterDecision(false, "Distance unavailable", "DISTANCE")
-            }
-            if (maxDistance > 0f && ride.distanceKm > maxDistance) {
-                return FilterDecision(false, "Pickup distance ${ride.distanceKm} km > Max $maxDistance km", "DISTANCE")
-            }
-        }
-        
-        if (isPriceFilterOn) {
-            val minPrice = getMinPrice(context)
-            val maxPrice = getMaxPrice(context)
-            if (ride.price == null) {
-                return FilterDecision(false, "Fare unavailable", "PRICE")
-            }
-            if (minPrice > 0f && ride.price < minPrice) {
-                return FilterDecision(false, "Fare ₹${ride.price.toInt()} < Min ₹${minPrice.toInt()}", "PRICE")
-            }
-            if (maxPrice > 0f && ride.price > maxPrice) {
-                return FilterDecision(false, "Fare ₹${ride.price.toInt()} > Max ₹${maxPrice.toInt()}", "PRICE")
-            }
-        }
-        
-        if (isRatingFilterOn) {
-            val minRating = getMinPassengerRating(context)
-            if (ride.passengerRating == null) {
-                return FilterDecision(false, "Passenger rating unavailable", "RATING")
-            }
-            if (ride.passengerRating < minRating) {
-                return FilterDecision(false, "Passenger rating ${ride.passengerRating}★ < Min ${minRating}★", "RATING")
-            }
-        }
-        
-        if (isBlacklistFilterOn) {
-            val blacklistCsv = getBlacklistKeywords(context)
-            val keywords = blacklistCsv.split(",").map { it.trim() }.filter { it.isNotEmpty() }
-            for (keyword in keywords) {
-                val pickMatch = ride.pickup?.contains(keyword, true) == true
-                val dropMatch = ride.drop?.contains(keyword, true) == true
-                if (pickMatch || dropMatch) {
-                    return FilterDecision(false, "Matched blacklisted keyword: $keyword", "BLACKLIST")
-                }
-            }
-        }
-        
-        try {
-            val db = com.example.data.AppDatabase.getDatabase(context)
-            val activeRules = db.settingsDao().getActiveCustomRulesSync()
-            if (activeRules.isNotEmpty()) {
-                for (rule in activeRules) {
-                    if (rule.isMinFareEnabled) {
-                        if (ride.price == null || ride.price < rule.minFare) return FilterDecision(false, "Did not meet Custom Rule min fare", "CUSTOM_RULE")
-                    }
-                    if (rule.isMaxDistanceEnabled) {
-                        if (ride.distanceKm == null || ride.distanceKm > rule.maxDistanceKm) return FilterDecision(false, "Did not meet Custom Rule max distance", "CUSTOM_RULE")
-                    }
-                    if (rule.isRatingFilterEnabled) {
-                        if (ride.passengerRating == null || ride.passengerRating < rule.minPassengerRating) return FilterDecision(false, "Did not meet Custom Rule min rating", "CUSTOM_RULE")
-                    }
-                    if (rule.destinationKeyword.isNotBlank()) {
-                        if (ride.pickup == null && ride.drop == null) {
-                            return FilterDecision(false, "Required location missing for Custom Rule", "CUSTOM_RULE")
-                        }
-                        val pickMatch = ride.pickup?.contains(rule.destinationKeyword, true) == true
-                        val dropMatch = ride.drop?.contains(rule.destinationKeyword, true) == true
-                        if (!pickMatch && !dropMatch) {
-                            return FilterDecision(false, "Did not match Custom Rule destination keyword", "CUSTOM_RULE")
-                        }
-                    }
-                }
-            }
-        } catch (e: Exception) {
-            Log.e(TAG, "Room custom rule check failed: ${e.message}")
-            return FilterDecision(false, "RULE_EVALUATION_ERROR: Database unavailable", "CUSTOM_RULE")
-        }
-        
-        val reason = if (!isBlacklistFilterOn && !isDistanceFilterOn && !isPriceFilterOn && !isRatingFilterOn) {
-            "Auto-Accepted (All Filters OFF - ${ride.delayMs}ms)"
-        } else {
-            "Auto-Accepted (Filters Passed - ${ride.delayMs}ms)"
-        }
-        
-        return FilterDecision(true, reason, null)
-    }
-
-    private fun processActiveWindow(rootNode: AccessibilityNodeInfo, sourcePackage: String) {
+        private fun processActiveWindow(rootNode: AccessibilityNodeInfo, sourcePackage: String) {
         val acceptButtons = findAllAcceptButtons(rootNode)
         
         if (acceptButtons.isEmpty()) {
             return
         }
 
-        val isPremium = isPassActive(this)
-        var bestRide: RideData? = null
+        acquireCpuWakeLock(timeoutMs = 15000L, reason = "Incoming ride detected on screen")
+
+        var bestRide: CapturedRide? = null
         var bestButton: ValidatedButton? = null
-        var bestBoxBounds = android.graphics.Rect()
+        var bestBoxBounds: android.graphics.Rect? = null
+        var bestCardContainer: AccessibilityNodeInfo? = null
 
         for (validButton in acceptButtons) {
-            val cardContainer = findCardContainer(validButton.node)
+            val cardContainer = findCardContainer(validButton.node, maxLevels = 5)
             
             val cardTexts = extractAllScreenTexts(this, cardContainer)
-            
+
+            // STRICT CARD VALIDATION
             val parsedDistance = extractDistance(cardTexts)
             val parsedPrice = extractPrice(cardTexts)
-            val parsedRating = extractPassengerRating(cardTexts)
-            val parsedPickup = extractPickupLocation(cardTexts)
-            val parsedDrop = extractDropLocation(cardTexts)
 
-            val rideSignature = generateRideSignature(sourcePackage, parsedPrice, parsedDistance, parsedRating, parsedPickup, parsedDrop)
+            if (parsedPrice == null || parsedPrice <= 0f) {
+                Log.w(TAG, "Fare not detected (Parsed: ${parsedPrice}). Ignored to prevent fake clicks.")
+                continue // Skip: Real orders ALWAYS have a concrete fare amount!
+            }
+            
+            val parsedRating = extractPassengerRating(cardTexts)
+            val parsedPickup = extractPickupLocation(cardTexts) ?: "Nearby Pickup"
+            val parsedDrop = extractDropLocation(cardTexts) ?: "Destination Drop"
+
+            val fareInfo = parsedPrice?.let { "₹${it.toInt()}" } ?: "Fare ~"
+            val distInfo = parsedDistance?.let { "${it} km" } ?: "Dist ~"
+            val ratingInfo = parsedRating?.let { "★ $it" } ?: "★ ~"
+
+            val rideSignature = generateRideSignature(sourcePackage, parsedPrice, parsedDistance, parsedPickup, parsedDrop)
 
             val lastRejected = recentlyRejectedRides[rideSignature]
             if (lastRejected != null && System.currentTimeMillis() - lastRejected < REJECT_COOLDOWN_MS) continue
 
-            val configuredDelay = getAcceptDelayMs(this)
-            val delayMs = if (!isPremium) 1500L else configuredDelay
+            val lastAccepted = recentlyAcceptedRides[rideSignature]
+            if (lastAccepted != null && System.currentTimeMillis() - lastAccepted < DUPLICATE_COOLDOWN_MS) {
+                Log.d(TAG, "Duplicate ride already accepted recently: $rideSignature")
+                continue
+            }
 
-            val capturedRide = RideData(
+            if (pendingAcceptJob?.isActive == true && pendingRideSignature == rideSignature) {
+                continue
+            }
+
+            logServiceEvent(
+                type = ServiceEventType.RIDE_DETECTED,
+                title = "Ride detected",
+                description = "$fareInfo • $distInfo • $parsedPickup → $parsedDrop",
+                details = "Card texts: ${cardTexts.take(3).joinToString(", ")}",
+                badge = "DETECTED"
+            )
+
+            val isPremium = isPassActive(this)
+            val configuredDelay = getAcceptDelayMs(this)
+            val delayMs: Long
+            val acceptReason: String
+
+            if (!isPremium) {
+                delayMs = 1500L
+                acceptReason = "Auto-Accepted (Free Mode - 1.5s Delay)"
+                Log.d(TAG, "Free Mode active: Skipping all filters and custom delay.")
+            } else {
+                delayMs = configuredDelay
+
+                val isBlacklistFilterOn = isBlacklistEnabled(this)
+                val isDistanceFilterOn = isDistanceFilterEnabled(this)
+                val isPriceFilterOn = isPriceFilterEnabled(this)
+                val isRatingFilterOn = isPassengerRatingFilterEnabled(this)
+                val areAllFiltersOff = !isBlacklistFilterOn && !isDistanceFilterOn && !isPriceFilterOn && !isRatingFilterOn
+
+                if (areAllFiltersOff) {
+                    Log.d(TAG, "Accept All Override active: All individual filters OFF -> accepting without parameter checks.")
+                    acceptReason = "Auto-Accepted (Premium Accept All - ${delayMs}ms)"
+                } else {
+                    var filterFailed = false
+                    
+                    if (isBlacklistFilterOn) {
+                        val blacklistCsv = getBlacklistKeywords(this)
+                        val matchedKeyword = findBlacklistedKeyword(cardTexts, blacklistCsv)
+                        if (matchedKeyword != null) {
+                            val logMsg = "Order REJECTED: Blacklisted keyword matched ('$matchedKeyword')"
+                            Log.i(TAG, logMsg)
+                            _recentLog.value = logMsg
+                            logServiceEvent(
+                                type = ServiceEventType.ORDER_IGNORED,
+                                title = "Order rejected (Blacklist)",
+                                description = "Location matched '$matchedKeyword' ($fareInfo)",
+                                details = "Drop: $parsedDrop",
+                                badge = "REJECTED"
+                            )
+                            logRideLocally(this, parsedPrice ?: 0f, parsedDistance ?: 0f, parsedPickup, parsedDrop, "IGNORED", "Blacklisted location: $matchedKeyword", sourcePackage)
+                            filterFailed = true
+                        }
+                    }
+
+                    if (!filterFailed && isDistanceFilterOn) {
+                        val maxDistance = getMaxDistanceKm(this)
+                        if (maxDistance > 0f && parsedDistance != null && parsedDistance > maxDistance) {
+                            val logMsg = "Order REJECTED: Distance ${parsedDistance} km > Max ${maxDistance} km"
+                            Log.i(TAG, logMsg)
+                            _recentLog.value = logMsg
+                            logServiceEvent(
+                                type = ServiceEventType.ORDER_IGNORED,
+                                title = "Order rejected (Distance)",
+                                description = "Pickup ${parsedDistance} km > Max ${maxDistance} km limit",
+                                details = "Pickup: $parsedPickup",
+                                badge = "REJECTED"
+                            )
+                            logRideLocally(this, parsedPrice ?: 0f, parsedDistance, parsedPickup, parsedDrop, "IGNORED", "Distance too high (${parsedDistance} km > ${maxDistance} km)", sourcePackage)
+                            filterFailed = true
+                        }
+                    }
+
+                    if (!filterFailed && isPriceFilterOn) {
+                        val minPrice = getMinPrice(this)
+                        val maxPrice = getMaxPrice(this)
+                        
+                        if (parsedPrice != null) {
+                            if (minPrice > 0f && parsedPrice < minPrice) {
+                                val logMsg = "Order REJECTED: Fare ₹${parsedPrice.toInt()} < Min ₹${minPrice.toInt()}"
+                                Log.i(TAG, logMsg)
+                                _recentLog.value = logMsg
+                                logServiceEvent(
+                                    type = ServiceEventType.ORDER_IGNORED,
+                                    title = "Order rejected (Fare Low)",
+                                    description = "Fare ₹${parsedPrice.toInt()} < Min ₹${minPrice.toInt()}",
+                                    details = "Pickup: $parsedPickup",
+                                    badge = "REJECTED"
+                                )
+                                logRideLocally(this, parsedPrice, parsedDistance ?: 0f, parsedPickup, parsedDrop, "IGNORED", "Price below minimum (₹${parsedPrice.toInt()} < ₹${minPrice.toInt()})", sourcePackage)
+                                filterFailed = true
+                            } else if (maxPrice > 0f && parsedPrice > maxPrice) {
+                                val logMsg = "Order REJECTED: Fare ₹${parsedPrice.toInt()} > Max ₹${maxPrice.toInt()}"
+                                Log.i(TAG, logMsg)
+                                _recentLog.value = logMsg
+                                logServiceEvent(
+                                    type = ServiceEventType.ORDER_IGNORED,
+                                    title = "Order rejected (Fare High)",
+                                    description = "Fare ₹${parsedPrice.toInt()} > Max ₹${maxPrice.toInt()}",
+                                    details = "Pickup: $parsedPickup",
+                                    badge = "REJECTED"
+                                )
+                                logRideLocally(this, parsedPrice, parsedDistance ?: 0f, parsedPickup, parsedDrop, "IGNORED", "Price above maximum (₹${parsedPrice.toInt()} > ₹${maxPrice.toInt()})", sourcePackage)
+                                filterFailed = true
+                            }
+                        }
+                    }
+
+                    if (!filterFailed && isRatingFilterOn) {
+                        val minRating = getMinPassengerRating(this)
+                        if (parsedRating != null && parsedRating < minRating) {
+                            val logMsg = "Order REJECTED: Passenger rating ${parsedRating}★ < Min ${minRating}★"
+                            Log.i(TAG, logMsg)
+                            _recentLog.value = logMsg
+                            logServiceEvent(
+                                type = ServiceEventType.ORDER_IGNORED,
+                                title = "Order rejected (Rating Low)",
+                                description = "Passenger rating ${parsedRating}★ < Min ${minRating}★",
+                                details = "Pickup: $parsedPickup",
+                                badge = "REJECTED"
+                            )
+                            logRideLocally(this, parsedPrice ?: 0f, parsedDistance ?: 0f, parsedPickup, parsedDrop, "IGNORED", "Passenger rating below threshold (${parsedRating}★ < ${minRating}★)", sourcePackage)
+                            filterFailed = true
+                        }
+                    }
+
+                    // Room Database: Custom Filtering Rules evaluation
+                    if (!filterFailed) {
+                        try {
+                            val db = com.example.data.AppDatabase.getDatabase(this)
+                            val activeRules = db.settingsDao().getActiveCustomRulesSync()
+                            if (activeRules.isNotEmpty()) {
+                                var matchedAny = false
+                                for (rule in activeRules) {
+                                    var violates = false
+                                    if (rule.isMinFareEnabled && parsedPrice != null && parsedPrice < rule.minFare) {
+                                        violates = true
+                                    }
+                                    if (rule.isMaxDistanceEnabled && parsedDistance != null && parsedDistance > rule.maxDistanceKm) {
+                                        violates = true
+                                    }
+                                    if (rule.isRatingFilterEnabled && parsedRating != null && parsedRating < rule.minPassengerRating) {
+                                        violates = true
+                                    }
+                                    if (rule.destinationKeyword.isNotBlank()) {
+                                        val matchesWord = cardTexts.any { it.contains(rule.destinationKeyword, ignoreCase = true) }
+                                        if (!matchesWord) violates = true
+                                    }
+                                    if (!violates) {
+                                        matchedAny = true
+                                        break
+                                    }
+                                }
+                                if (!matchedAny) {
+                                    val logMsg = "Order REJECTED: Did not match active custom rules in Room DB"
+                                    Log.i(TAG, logMsg)
+                                    _recentLog.value = logMsg
+                                    logServiceEvent(
+                                        type = ServiceEventType.ORDER_IGNORED,
+                                        title = "Order rejected (Custom Rule)",
+                                        description = "Did not meet criteria of active custom filtering rules",
+                                        details = "Fare: $fareInfo • Dist: $distInfo",
+                                        badge = "REJECTED"
+                                    )
+                                    logRideLocally(this, parsedPrice ?: 0f, parsedDistance ?: 0f, parsedPickup, parsedDrop, "IGNORED", "Filtered out by custom Room rules", sourcePackage)
+                                    filterFailed = true
+                                }
+                            }
+                        } catch (e: Exception) {
+                            Log.w(TAG, "Room custom rule check note: ${e.message}")
+                        }
+                    }
+
+                    if (filterFailed) {
+                        recentlyRejectedRides[rideSignature] = System.currentTimeMillis()
+                        continue
+                    }
+                    acceptReason = "Auto-Accepted (Filters Passed - ${delayMs}ms)"
+                }
+            }
+
+            val capturedRide = CapturedRide(
+                sourcePackage = sourcePackage,
                 price = parsedPrice,
                 distanceKm = parsedDistance,
-                passengerRating = parsedRating,
                 pickup = parsedPickup,
                 drop = parsedDrop,
-                sourcePackage = sourcePackage,
                 signature = rideSignature,
+                acceptReason = acceptReason,
                 isPremium = isPremium,
                 delayMs = delayMs
             )
 
-            val filterDecision = evaluateRideAgainstFilters(this, capturedRide)
-
-            if (!filterDecision.passed) {
-                Log.i(TAG, filterDecision.reason)
-                _recentLog.value = filterDecision.reason
-                logServiceEvent(
-                    type = ServiceEventType.ORDER_IGNORED,
-                    title = "Order rejected (${filterDecision.failedFilter ?: "Filter"})",
-                    description = filterDecision.reason,
-                    details = "Drop: ${parsedDrop ?: "Unknown"}",
-                    badge = "REJECTED"
-                )
-                logRideLocally(this, parsedPrice ?: 0f, parsedDistance ?: 0f, parsedPickup ?: "Unknown", parsedDrop ?: "Unknown", "IGNORED", filterDecision.reason, sourcePackage)
-                recentlyRejectedRides[rideSignature] = System.currentTimeMillis()
-                continue
-            }
-
-            // Select highest payout
+            // Batch filtering: Pick highest payout
             if (bestRide == null || (capturedRide.price ?: 0f) > (bestRide.price ?: 0f)) {
                 bestRide = capturedRide
                 bestButton = validButton
                 val tBounds = android.graphics.Rect()
-                cardContainer.getBoundsInScreen(tBounds)
-                if (tBounds.isEmpty) tBounds.set(validButton.targetBounds)
+                if (cardContainer != null) {
+                    cardContainer.getBoundsInScreen(tBounds)
+                } else {
+                    tBounds.set(validButton.targetBounds)
+                }
                 bestBoxBounds = tBounds
+                bestCardContainer = cardContainer
             }
-        }
+        } // End of acceptButtons loop
 
         if (bestRide != null && bestButton != null) {
             val capturedRide = bestRide
@@ -2335,69 +2405,13 @@ fun getCustomSoundUri(context: Context): String? {
                         return@launch
                     }
 
-                    Log.d(TAG, "ACCEPT_REVALIDATION_STARTED for $rideSignature")
-
-                    // BUG 7/9: REVALIDATE COMPLETELY!
-                    val newRoot = try { rootInActiveWindow } catch(e: Exception) { null }
-                    if (newRoot == null) {
-                        Log.w(TAG, "ACCEPT_REVALIDATION_FAILED: rootInActiveWindow unavailable")
-                        return@launch
-                    }
-                    
-                    val newPackage = newRoot.packageName?.toString()
-                    if (newPackage == null || newPackage != sourcePackage) {
-                        Log.w(TAG, "ACCEPT_REVALIDATION_FAILED: PACKAGE_MISMATCH (Expected $sourcePackage, got $newPackage)")
-                        _recentLog.value = "Accept cancelled: PACKAGE_MISMATCH"
+                    val recentAcceptedCheck = recentlyAcceptedRides[capturedRide.signature]
+                    if (recentAcceptedCheck != null && System.currentTimeMillis() - recentAcceptedCheck < DUPLICATE_COOLDOWN_MS) {
+                        Log.w(TAG, "Pending accept cancelled: duplicate cooldown active")
                         return@launch
                     }
 
-                    // Re-discover accept buttons and extract data to verify signature hasn't changed
-                    val currentButtons = findAllAcceptButtons(newRoot)
-                    var revalidatedButton: ValidatedButton? = null
-                    var signatureMatch = false
-
-                    for (cb in currentButtons) {
-                        val cCardContainer = findCardContainer(cb.node)
-                        val cCardTexts = extractAllScreenTexts(this@AutoAcceptService, cCardContainer)
-                        val cPrice = extractPrice(cCardTexts)
-                        val cDist = extractDistance(cCardTexts)
-                        val cRating = extractPassengerRating(cCardTexts)
-                        val cPickup = extractPickupLocation(cCardTexts)
-                        val cDrop = extractDropLocation(cCardTexts)
-                        
-                        val currentSignature = generateRideSignature(sourcePackage, cPrice, cDist, cRating, cPickup, cDrop)
-                        
-                        if (currentSignature == capturedRide.signature) {
-                            // Run filters again just to be safe
-                            val cRideData = RideData(cPrice, cDist, extractPassengerRating(cCardTexts), cPickup, cDrop, sourcePackage, currentSignature, isPremium, delayMs)
-                            val cDecision = evaluateRideAgainstFilters(this@AutoAcceptService, cRideData)
-                            if (cDecision.passed) {
-                                signatureMatch = true
-                                revalidatedButton = cb
-                                break
-                            } else {
-                                Log.w(TAG, "ACCEPT_REVALIDATION_FAILED: Re-evaluation of filters failed: ${cDecision.reason}")
-                                return@launch
-                            }
-                        }
-                    }
-
-                    if (!signatureMatch || revalidatedButton == null) {
-                        Log.w(TAG, "ACCEPT_REVALIDATION_FAILED: Candidate disappeared or signature changed.")
-                        _recentLog.value = "Accept cancelled: Screen changed"
-                        return@launch
-                    }
-                    
-                    Log.d(TAG, "ACCEPT_BUTTON_REDISCOVERED successfully.")
-
-                    acceptMutex.withLock {
-                        val recentAcceptedCheck = recentlyAcceptedRides[capturedRide.signature]
-                        if (recentAcceptedCheck != null && System.currentTimeMillis() - recentAcceptedCheck < DUPLICATE_COOLDOWN_MS) {
-                            Log.w(TAG, "Pending accept cancelled: duplicate cooldown active")
-                            return@launch
-                        }
-    
-                        if (isPremium && isVoiceOnlyMode(this@AutoAcceptService)) {
+                    if (isPremium && isVoiceOnlyMode(this@AutoAcceptService)) {
                         lastClickTimestamp = SystemClock.uptimeMillis()
                         isGenuineOrderIncoming = false
                         notificationResetJob?.cancel()
@@ -2406,6 +2420,7 @@ fun getCustomSoundUri(context: Context): String? {
 
                         val finalFare = capturedRide.price?.let { "₹${it.toInt()}" } ?: "Fare ~"
                         val finalDist = capturedRide.distanceKm?.let { "${it} km" } ?: "Dist ~"
+
                         val logMessage = "Passive Radar: Voice only announcement for $finalFare ($finalDist) to ${capturedRide.drop}"
                         Log.i(TAG, logMessage)
                         _recentLog.value = logMessage
@@ -2417,18 +2432,20 @@ fun getCustomSoundUri(context: Context): String? {
                             details = "Voice-only mode active: button click bypassed",
                             badge = "RADAR"
                         )
+
+                        val userName = getUserName(this@AutoAcceptService).ifBlank { DEFAULT_USER_NAME }
+                        val announcement = generateOrderAnnouncement(
+                            context = this@AutoAcceptService,
+                            name = userName,
+                            price = capturedRide.price?.toInt(),
+                            distanceKm = capturedRide.distanceKm,
+                            dropLocation = capturedRide.drop
+                        )
+                        speak(announcement)
                         return@launch
                     }
 
-                    val executeRoot = try { rootInActiveWindow } catch(e: Exception) { null }
-                    if (executeRoot == null || executeRoot.packageName?.toString() != sourcePackage) {
-                        Log.w(TAG, "ACCEPT_REVALIDATION_FAILED: PACKAGE_MISMATCH (Right before click)")
-                        _recentLog.value = "Accept cancelled: PACKAGE_MISMATCH"
-                        return@launch
-                    }
-
-                    // BUG 10: Change SUCCESS logging!
-                    when (val outcome = executeAcceptClick(revalidatedButton!!)) {
+                    when (val outcome = executeAcceptClick(validButton)) {
                         is ClickResult.Success -> {
                             lastClickTimestamp = SystemClock.uptimeMillis()
                             isGenuineOrderIncoming = false
@@ -2440,34 +2457,34 @@ fun getCustomSoundUri(context: Context): String? {
                             val finalFare = capturedRide.price?.let { "₹${it.toInt()}" } ?: "Fare ~"
                             val finalDist = capturedRide.distanceKm?.let { "${it} km" } ?: "Dist ~"
 
-                            val logMessage = "Accept action dispatched in ${capturedRide.sourcePackage} [$finalFare | $finalDist] $engineMode"
+                            val logMessage = "Accepted order in ${capturedRide.sourcePackage} [$finalFare | $finalDist] $engineMode"
                             Log.i(TAG, logMessage)
                             _recentLog.value = logMessage
-                            updateForegroundNotification("Accept dispatched: $finalFare ($finalDist)")
+                            updateForegroundNotification("Accepted: $finalFare ($finalDist)")
                             logServiceEvent(
-                                type = ServiceEventType.ORDER_ACCEPTED, // Keeping event type for dashboard
-                                title = "Accept action dispatched",
-                                description = "Tapped accept button for $finalFare ($finalDist)",
-                                details = "Waiting for app to confirm",
-                                badge = "DISPATCHED"
+                                type = ServiceEventType.ORDER_ACCEPTED,
+                                title = "Order accepted",
+                                description = "Successfully tapped accept button for $finalFare ($finalDist)",
+                                details = "Auto-click executed via ${outcome.method} (${capturedRide.acceptReason})",
+                                badge = if (capturedRide.isPremium) "FAST" else "ACCEPTED"
                             )
                             
                             triggerSuccessVibration()
                             playSuccessSound()
                             sendAutoAcceptNotification(
                                 context = this@AutoAcceptService,
-                                title = "Action Dispatched: $finalFare",
-                                message = "Dist: $finalDist | Drop: ${capturedRide.drop ?: "Unknown"}"
+                                title = "Auto-Accepted: $finalFare",
+                                message = "Dist: $finalDist | Drop: ${capturedRide.drop}"
                             )
 
                             logRideLocally(
                                 context = this@AutoAcceptService,
                                 price = capturedRide.price ?: 0f,
                                 pickupKm = capturedRide.distanceKm ?: 0f,
-                                pickupLocation = capturedRide.pickup ?: "Unknown",
-                                dropLocation = capturedRide.drop ?: "Unknown",
-                                status = "DISPATCHED",
-                                reason = "Action dispatched to UI",
+                                pickupLocation = capturedRide.pickup,
+                                dropLocation = capturedRide.drop,
+                                status = "ACCEPTED",
+                                reason = capturedRide.acceptReason,
                                 sourcePackage = capturedRide.sourcePackage
                             )
 
@@ -2478,19 +2495,34 @@ fun getCustomSoundUri(context: Context): String? {
                                     name = userName,
                                     price = capturedRide.price?.toInt(),
                                     distanceKm = capturedRide.distanceKm,
-                                    dropLocation = capturedRide.drop ?: "Unknown"
+                                    dropLocation = capturedRide.drop
                                 )
                                 speak(announcement)
                             }
                         }
                         is ClickResult.Cancelled -> {
                             Log.w(TAG, "Click cancelled: ${outcome.reason}")
+                            _recentLog.value = "Click cancelled: ${outcome.reason}"
+                            logServiceEvent(
+                                type = ServiceEventType.ORDER_IGNORED,
+                                title = "Accept cancelled",
+                                description = outcome.reason,
+                                badge = "CANCELLED"
+                            )
                         }
                         is ClickResult.Failed -> {
                             Log.e(TAG, "Click failed: ${outcome.reason}")
+                            _recentLog.value = "Click failed: ${outcome.reason}"
+                            logServiceEvent(
+                                type = ServiceEventType.ORDER_IGNORED,
+                                title = "Click failed",
+                                description = outcome.reason,
+                                badge = "FAILED"
+                            )
                         }
                     }
-                    } // end withLock
+                } catch (e: CancellationException) {
+                    Log.d(TAG, "Pending accept coroutine cancelled: ${e.message}")
                 } catch (e: Exception) {
                     Log.e(TAG, "Error in pending accept execution: ${e.message}", e)
                 } finally {
@@ -2499,11 +2531,19 @@ fun getCustomSoundUri(context: Context): String? {
                     }
                 }
             }
+
+            return
+        }
+
+        if (pendingAcceptJob?.isActive != true) {
+            releaseCpuWakeLock("No valid ride cards found or all failed filters")
         }
     }
 
-
-
+    /**
+     * Traverses the accessibility node hierarchy iteratively to extract all nodes on screen.
+     * Enforces package isolation to strictly ignore nodes from YouTube, Chrome, System UI, etc.
+     */
     private fun traverseAllNodes(rootNode: AccessibilityNodeInfo, maxNodes: Int = 800): List<AccessibilityNodeInfo> {
         val nodes = mutableListOf<AccessibilityNodeInfo>()
         val queue = java.util.ArrayDeque<AccessibilityNodeInfo>()
@@ -2579,25 +2619,13 @@ fun getCustomSoundUri(context: Context): String? {
      * Finds the legitimate accept button in the active ride window, using deep node traversal,
      * fuzzy keyword matching with parent delegation, ViewID lookup, and bottom-screen heuristic fallback.
      */
-    private fun findCardContainer(node: AccessibilityNodeInfo): AccessibilityNodeInfo {
+    private fun findCardContainer(node: AccessibilityNodeInfo, maxLevels: Int = 5): AccessibilityNodeInfo {
         var current: AccessibilityNodeInfo = node
         var depth = 0
-        while (depth < 10) {
+        while (depth < maxLevels) {
             val parent = try { current.parent } catch (e: Exception) { null } ?: break
-            val className = parent.className?.toString() ?: ""
-            if (className.contains("RecyclerView") || className.contains("ListView") || className.contains("ScrollView")) {
-                return current
-            }
             current = parent
             depth++
-            
-            try {
-                val b = android.graphics.Rect()
-                current.getBoundsInScreen(b)
-                if (b.height() > 300 && b.width() > 300) {
-                    return current
-                }
-            } catch (e: Exception) {}
         }
         return current
     }
@@ -2616,7 +2644,7 @@ fun getCustomSoundUri(context: Context): String? {
 
                 if (isNodeValidAcceptButton(node)) {
                     val targetClickableNode = findClickableTargetOrAncestor(node, maxLevels = 4)
-                    val targetBounds = android.graphics.Rect()
+                    val targetBounds = Rect()
                     targetClickableNode.getBoundsInScreen(targetBounds)
                     if (targetBounds.isEmpty) node.getBoundsInScreen(targetBounds)
 
@@ -2632,9 +2660,12 @@ fun getCustomSoundUri(context: Context): String? {
         }
 
         val allNodes = traverseAllNodes(rootNode)
+
         for (node in allNodes) {
             val nodePkg = node.packageName?.toString()
-            if (nodePkg != null && !getEnabledApps(this@AutoAcceptService).contains(nodePkg)) continue
+            if (nodePkg != null && !getEnabledApps(this@AutoAcceptService).contains(nodePkg)) {
+                continue
+            }
 
             val textCandidates = listOfNotNull(
                 node.text?.toString()?.trim(),
@@ -2656,9 +2687,11 @@ fun getCustomSoundUri(context: Context): String? {
                     if (isNodeValidAcceptButton(node)) {
                         val targetClickableNode = findClickableTargetOrAncestor(node, maxLevels = 4)
                         val targetPkg = targetClickableNode.packageName?.toString()
-                        if (targetPkg != null && !getEnabledApps(this@AutoAcceptService).contains(targetPkg)) continue
+                        if (targetPkg != null && !getEnabledApps(this@AutoAcceptService).contains(targetPkg)) {
+                            continue
+                        }
 
-                        val targetBounds = android.graphics.Rect()
+                        val targetBounds = Rect()
                         try {
                             targetClickableNode.getBoundsInScreen(targetBounds)
                             if (targetBounds.isEmpty || targetBounds.width() < 1 || targetBounds.height() < 1) {
@@ -2670,7 +2703,12 @@ fun getCustomSoundUri(context: Context): String? {
 
                         val isSwipe = text.contains("swipe", ignoreCase = true)
                         val actionType = if (isSwipe) ActionType.SWIPE else ActionType.CLICK
-                        val reason = if (isSwipe) "Fuzzy Keyword Swipe ('$text')" else "Fuzzy Keyword Accept ('$text')"
+
+                        val reason = if (isSwipe) {
+                            "Fuzzy Keyword Swipe ('$text')"
+                        } else {
+                            "Fuzzy Keyword Accept ('$text')"
+                        }
 
                         buttons.add(ValidatedButton(
                             node = targetClickableNode,
@@ -2686,16 +2724,21 @@ fun getCustomSoundUri(context: Context): String? {
         for (viewId in ACCEPT_BUTTON_VIEW_IDS) {
             val matchingNodes = try {
                 rootNode.findAccessibilityNodeInfosByViewId(viewId)
-            } catch (e: Exception) { emptyList() }
+            } catch (e: Exception) {
+                emptyList()
+            }
             for (node in matchingNodes) {
                 val nodePkg = node.packageName?.toString()
-                if (nodePkg != null && !getEnabledApps(this@AutoAcceptService).contains(nodePkg)) continue
+                if (nodePkg != null && !getEnabledApps(this@AutoAcceptService).contains(nodePkg)) {
+                    continue
+                }
                 if (isNodeValidAcceptButton(node)) {
                     val targetClickableNode = findClickableTargetOrAncestor(node, maxLevels = 4)
                     val targetPkg = targetClickableNode.packageName?.toString()
-                    if (targetPkg != null && !getEnabledApps(this@AutoAcceptService).contains(targetPkg)) continue
-                    
-                    val targetBounds = android.graphics.Rect()
+                    if (targetPkg != null && !getEnabledApps(this@AutoAcceptService).contains(targetPkg)) {
+                        continue
+                    }
+                    val targetBounds = Rect()
                     targetClickableNode.getBoundsInScreen(targetBounds)
                     if (targetBounds.isEmpty) node.getBoundsInScreen(targetBounds)
                     buttons.add(ValidatedButton(
@@ -2708,9 +2751,115 @@ fun getCustomSoundUri(context: Context): String? {
             }
         }
 
+        val displayHeight = resources.displayMetrics.heightPixels
+        val rootBounds = Rect()
+        try {
+            rootNode.getBoundsInScreen(rootBounds)
+        } catch (e: Exception) {}
+        val screenHeight = if (!rootBounds.isEmpty && rootBounds.height() > 200) {
+            rootBounds.height()
+        } else {
+            displayHeight
+        }
+
+        val bottomFallback = findBottomScreenHeuristicButton(allNodes, screenHeight)
+        if (bottomFallback != null) {
+            buttons.add(bottomFallback)
+        }
+
         return buttons.distinctBy { it.targetBounds.toShortString() }
     }
 
+    /**
+     * Scans the bottom 25% of the screen bounds for the largest clickable ViewGroup or Button.
+     */
+    private fun findBottomScreenHeuristicButton(allNodes: List<AccessibilityNodeInfo>, screenHeight: Int): ValidatedButton? {
+        val bottomThreshold = screenHeight * 0.75f
+        var bestCandidate: AccessibilityNodeInfo? = null
+        var bestBounds = Rect()
+        var maxArea = 0L
+
+        for (node in allNodes) {
+            val nodePkg = node.packageName?.toString()
+            if (nodePkg != null && !getEnabledApps(this@AutoAcceptService).contains(nodePkg)) {
+                continue
+            }
+
+            if (!node.isEnabled) continue
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N && !node.isVisibleToUser) continue
+
+            val bounds = Rect()
+            try {
+                node.getBoundsInScreen(bounds)
+            } catch (e: Exception) {
+                continue
+            }
+
+            val nodeText = (node.text?.toString() ?: node.contentDescription?.toString() ?: "").lowercase()
+            if (nodeText.contains("open step list") || nodeText.contains("recenter") || nodeText.contains("mute") || nodeText.contains("route") || nodeText.contains("navigation")) {
+                continue
+            }
+
+            // Must reside in the bottom 25% of the screen
+            if (bounds.centerY() < bottomThreshold && bounds.bottom < bottomThreshold) {
+                continue
+            }
+
+            // Exclude fullscreen roots and tiny invisible controls
+            if (bounds.height() >= (screenHeight * 0.40f) || bounds.width() <= 30 || bounds.height() <= 20) {
+                continue
+            }
+
+            // Check if it is a Button, ViewGroup, or clickable element
+            val className = node.className?.toString() ?: ""
+            val isButtonOrGroup = className.contains("Button", ignoreCase = true) ||
+                    className.contains("ViewGroup", ignoreCase = true) ||
+                    className.contains("Layout", ignoreCase = true) ||
+                    node.isClickable
+
+            if (!isButtonOrGroup && !node.isClickable) {
+                continue
+            }
+
+            // Exclude negative words
+            val textCombined = ((node.text?.toString() ?: "") + " " + (node.contentDescription?.toString() ?: "")).lowercase()
+            val negativeWords = listOf("decline", "reject", "cancel", "back", "home", "terms", "policy", "cash", "upi", "profile", "close")
+            if (negativeWords.any { textCombined.contains(it) }) {
+                continue
+            }
+
+            val clickableTarget = if (node.isClickable) node else findClickableTargetOrAncestor(node, maxLevels = 3)
+            val targetPkg = clickableTarget.packageName?.toString()
+            if (targetPkg != null && !getEnabledApps(this@AutoAcceptService).contains(targetPkg)) {
+                continue
+            }
+
+            val area = bounds.width().toLong() * bounds.height().toLong()
+            if (area > maxArea) {
+                maxArea = area
+                bestCandidate = clickableTarget
+                bestBounds = Rect(bounds)
+            }
+        }
+
+        if (bestCandidate != null && maxArea > 0) {
+            val textCombined = ((bestCandidate.text?.toString() ?: "") + " " + (bestCandidate.contentDescription?.toString() ?: "")).lowercase()
+            val isSwipe = textCombined.contains("swipe")
+            val actionType = if (isSwipe) ActionType.SWIPE else ActionType.CLICK
+            return ValidatedButton(
+                node = bestCandidate,
+                reason = "Bottom-Screen Heuristic Fallback (${if (isSwipe) "Swipe" else "Click"}, Area: $maxArea)",
+                actionType = actionType,
+                targetBounds = bestBounds
+            )
+        }
+
+        return null
+    }
+
+    /**
+     * Unified method to find and execute accept interaction on the active screen.
+     */
     suspend fun findAndClickAcceptButton(rootNode: AccessibilityNodeInfo): ClickResult {
         val button = findAllAcceptButtons(rootNode).firstOrNull()
             ?: return ClickResult.Failed("Accept button not found on screen")
